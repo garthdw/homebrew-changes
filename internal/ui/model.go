@@ -54,6 +54,7 @@ var (
 	styleArrow     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	styleDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	styleHeader    = lipgloss.NewStyle().Bold(true)
+	styleSelected  = lipgloss.NewStyle().Bold(true)
 	styleBodyFrame = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
@@ -214,15 +215,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "up":
 			m.moveCursor(-1)
+			m.refreshViewport()
 
 		case "down":
 			m.moveCursor(1)
+			m.refreshViewport()
 
 		case "k":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
 				m.viewport.LineUp(1)
 			} else {
 				m.moveCursor(-1)
+				m.refreshViewport()
 			}
 
 		case "j":
@@ -230,6 +234,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.LineDown(1)
 			} else {
 				m.moveCursor(1)
+				m.refreshViewport()
 			}
 
 		case "enter":
@@ -339,10 +344,14 @@ func (m model) renderList() (string, []int) {
 			sourceHint = styleDim.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
 		}
 
-		writeLine(fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
+		line := fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
 			cursor, it.Name, it.Kind,
 			styleVersion.Render(it.Installed), styleVersion.Render(it.Current),
-			sourceHint))
+			sourceHint)
+		if i == m.cursor && !it.Expanded {
+			line = styleSelected.Render(line)
+		}
+		writeLine(line)
 
 		if it.Expanded {
 			var content string
