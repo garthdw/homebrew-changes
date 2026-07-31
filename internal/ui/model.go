@@ -359,14 +359,30 @@ func (m model) renderList() (string, []int) {
 	for i, it := range m.items {
 		itemLines[i] = line
 
-		cursor := "  "
-		if i == m.cursor {
-			cursor = styleArrow.Render("> ")
+		// Styled per-segment (rather than rendering the whole line and
+		// wrapping it in an outer style) because lipgloss.Render emits a
+		// full SGR reset at the end of each call; nesting one Render's
+		// output inside another clips the outer style at that reset.
+		selected := i == m.cursor && !it.Expanded && !it.Upgraded
+
+		cursorStyle, versionStyle, hintStyle := styleArrow, styleVersion, styleDim
+		switch {
+		case it.Upgraded:
+			cursorStyle, versionStyle = styleDim, styleDim
+		case selected:
+			cursorStyle = cursorStyle.Bold(true)
+			versionStyle = versionStyle.Bold(true)
+			hintStyle = hintStyle.Bold(true)
 		}
 
-		sourceHint := styleDim.Render("[no changelog source]")
+		cursor := "  "
+		if i == m.cursor {
+			cursor = cursorStyle.Render("> ")
+		}
+
+		sourceHint := hintStyle.Render("[no changelog source]")
 		if it.Owner != "" {
-			sourceHint = styleDim.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
+			sourceHint = hintStyle.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
 		}
 
 		var statusTag string
@@ -379,19 +395,18 @@ func (m model) renderList() (string, []int) {
 			statusTag = "  " + styleError.Render("[upgrade failed]")
 		}
 
-		var line string
-		if it.Upgraded {
-			line = styleDim.Render(fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
-				cursor, it.Name, it.Kind, it.Installed, it.Current, sourceHint)) + statusTag
-		} else {
-			line = fmt.Sprintf("%s%s (%s)  %s -> %s  %s%s",
-				cursor, it.Name, it.Kind,
-				styleVersion.Render(it.Installed), styleVersion.Render(it.Current),
-				sourceHint, statusTag)
-			if i == m.cursor && !it.Expanded {
-				line = styleSelected.Render(line)
-			}
+		nameKind := fmt.Sprintf("%s (%s)", it.Name, it.Kind)
+		switch {
+		case it.Upgraded:
+			nameKind = styleDim.Render(nameKind)
+		case selected:
+			nameKind = styleSelected.Render(nameKind)
 		}
+
+		line := fmt.Sprintf("%s%s  %s -> %s  %s%s",
+			cursor, nameKind,
+			versionStyle.Render(it.Installed), versionStyle.Render(it.Current),
+			sourceHint, statusTag)
 		writeLine(line)
 
 		if it.Expanded {
