@@ -4,29 +4,20 @@ A Homebrew tap that adds `brew changes`: before you upgrade, see what actually
 changed.
 
 `brew outdated` tells you *that* packages are outdated. `brew changes` tells
-you *what's in* the update — pulling each package's `CHANGELOG.md` (or
-`CHANGES.md`, `HISTORY.md`, `NEWS.md`) from GitHub, or falling back to GitHub
-Releases, before asking whether you want to upgrade.
-
-## Requirements
-
-- [`gh`](https://cli.github.com) (GitHub CLI), authenticated: `gh auth login`
-- `jq`
-
-Install both with:
-
-```sh
-brew install gh jq
-```
+you *what's in* the update — an interactive list of every outdated formula
+and cask, where you can expand any of them to see its `CHANGELOG.md` (or
+`CHANGES.md`, `HISTORY.md`, `NEWS.md`), falling back to GitHub Releases, then
+choose exactly which ones to upgrade.
 
 ## Install
 
 ```sh
-brew tap <your-github-user>/changes
+brew install garthdw/changes/brew-changes --HEAD
 ```
 
-`brew changes` is then available automatically — Homebrew discovers external
-commands in a tap's `cmd/` directory.
+There's no tagged release yet, so `--HEAD` (build from the latest commit) is
+required for now. Homebrew will build the Go binary from source — this
+requires Go, which the formula pulls in automatically as a build dependency.
 
 ## Usage
 
@@ -39,10 +30,37 @@ This will:
 1. Find every outdated formula and cask (`brew outdated`).
 2. For each one, try to resolve its GitHub repository from its homepage or
    source URL.
-3. Fetch and print the relevant changelog section (or recent GitHub releases
-   if no changelog file exists).
-4. Prompt once, at the end, to upgrade everything via `brew upgrade` /
-   `brew upgrade --cask` (default: yes — press Enter to proceed).
+3. Open an interactive list — nothing is fetched yet, so this is instant even
+   with many outdated packages.
+4. Navigate and review: expanding a package fetches and renders its
+   changelog on demand, so you only pay the GitHub API cost for what you
+   actually look at.
+5. Check the packages you want, then upgrade just those.
+
+### Keybindings
+
+| Key         | Action                                      |
+| ----------- | -------------------------------------------- |
+| `↑`/`↓`, `j`/`k` | Move the cursor                        |
+| `Enter`     | Expand/collapse the highlighted package's changelog |
+| `Space`     | Toggle whether the highlighted package is selected |
+| `a`         | Select/deselect all packages                |
+| `u`         | Upgrade the selected packages and quit      |
+| `q`, `Ctrl+C` | Quit without upgrading                    |
 
 Packages whose source isn't hosted on GitHub are listed with a note that no
 changelog could be found, rather than being skipped silently.
+
+## GitHub API rate limits
+
+`brew changes` talks to the GitHub API directly. Unauthenticated requests are
+limited to 60/hour, which can be tight if you review a lot of changelogs. Set
+a token to raise that limit:
+
+```sh
+export GITHUB_TOKEN=ghp_...   # or GH_TOKEN
+```
+
+If you have the [`gh`](https://cli.github.com) CLI installed and authenticated
+(`gh auth login`), `brew changes` will use its token automatically as a
+fallback when neither environment variable is set.
