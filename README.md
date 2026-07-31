@@ -9,6 +9,12 @@ and cask, where you can expand any of them in place to see its
 `CHANGELOG.md` (or `CHANGES.md`, `HISTORY.md`, `NEWS.md`), falling back to
 GitHub Releases, then upgrade everything or just the one you're looking at.
 
+<img width="1399" height="886" alt="image" src="https://github.com/user-attachments/assets/43705826-953a-4e60-bf34-02ccdda71ae1" />
+
+<img width="1401" height="883" alt="image" src="https://github.com/user-attachments/assets/b5642a7c-27f1-4db6-bd29-5d4d1008b058" />
+
+<img width="1410" height="884" alt="image" src="https://github.com/user-attachments/assets/7db1623b-8583-4291-aa96-06beccc85b6f" />
+
 ## Install
 
 ```sh
