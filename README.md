@@ -5,9 +5,9 @@ changed.
 
 `brew outdated` tells you *that* packages are outdated. `brew changes` tells
 you *what's in* the update — an interactive list of every outdated formula
-and cask, where you can expand any of them to see its `CHANGELOG.md` (or
-`CHANGES.md`, `HISTORY.md`, `NEWS.md`), falling back to GitHub Releases, then
-choose exactly which ones to upgrade.
+and cask, where you can expand any of them in place to see its
+`CHANGELOG.md` (or `CHANGES.md`, `HISTORY.md`, `NEWS.md`), falling back to
+GitHub Releases, then upgrade everything or just the one you're looking at.
 
 ## Install
 
@@ -33,9 +33,9 @@ This will:
 3. Open an interactive list — nothing is fetched yet, so this is instant even
    with many outdated packages.
 4. Navigate and review: expanding a package fetches and renders its
-   changelog on demand, so you only pay the GitHub API cost for what you
+   changelog in place, so you only pay the GitHub API cost for what you
    actually look at.
-5. Check the packages you want, then upgrade just those.
+5. Upgrade everything, or just the package you're currently looking at.
 
 ### Keybindings
 
@@ -43,9 +43,8 @@ This will:
 | ----------- | -------------------------------------------- |
 | `↑`/`↓`, `j`/`k` | Move the cursor                        |
 | `Enter`     | Expand/collapse the highlighted package's changelog |
-| `Space`     | Toggle whether the highlighted package is selected |
-| `a`         | Select/deselect all packages                |
-| `u`         | Upgrade the selected packages and quit      |
+| `a`         | Upgrade all outdated packages and quit      |
+| `u`         | Upgrade just the highlighted package and quit |
 | `q`, `Ctrl+C` | Quit without upgrading                    |
 
 Packages whose source isn't hosted on GitHub are listed with a note that no

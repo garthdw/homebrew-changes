@@ -58,13 +58,19 @@ func run() error {
 		return err
 	}
 
-	if !result.Upgrade || len(result.Selected) == 0 {
+	var toUpgrade []ui.Item
+	switch result.Action {
+	case ui.ActionUpgradeAll:
+		toUpgrade = items
+	case ui.ActionUpgradeOne:
+		toUpgrade = []ui.Item{result.Item}
+	default:
 		fmt.Println("No packages upgraded.")
 		return nil
 	}
 
 	var formulaNames, caskNames []string
-	for _, it := range result.Selected {
+	for _, it := range toUpgrade {
 		if it.Kind == "cask" {
 			caskNames = append(caskNames, it.Name)
 		} else {
@@ -72,6 +78,6 @@ func run() error {
 		}
 	}
 
-	fmt.Printf("Upgrading %d package(s)...\n", len(result.Selected))
+	fmt.Printf("Upgrading %d package(s)...\n", len(toUpgrade))
 	return homebrew.Upgrade(formulaNames, caskNames)
 }

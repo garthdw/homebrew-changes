@@ -25,22 +25,30 @@ type Item struct {
 	Repo      string // GitHub repo name
 
 	Expanded bool
-	Selected bool
 	Loading  bool
 	Body     string // rendered changelog/releases content, empty until fetched
 }
 
-// Result is returned by Run: the packages the user checked, and whether
-// they asked to proceed with the upgrade.
+// Action is what the user asked to do when they quit the list.
+type Action int
+
+const (
+	// ActionNone means the user quit without upgrading anything.
+	ActionNone Action = iota
+	// ActionUpgradeAll means every outdated package should be upgraded.
+	ActionUpgradeAll
+	// ActionUpgradeOne means only the hovered package should be upgraded.
+	ActionUpgradeOne
+)
+
+// Result is returned by Run: what the user asked to do, and (for
+// ActionUpgradeOne) which package.
 type Result struct {
-	Selected []Item
-	Upgrade  bool
+	Action Action
+	Item   Item
 }
 
 var (
-	styleCursor    = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	styleSelected  = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
-	styleUnselect  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	styleVersion   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	styleArrow     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	styleDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -57,7 +65,7 @@ type model struct {
 	cursor   int
 	spinner  spinner.Model
 	quitting bool
-	upgrade  bool
+	action   Action
 }
 
 func newModel(items []Item) model {
@@ -78,13 +86,11 @@ func Run(items []Item) (Result, error) {
 	}
 	fm := finalModel.(model)
 
-	var selected []Item
-	for _, it := range fm.items {
-		if it.Selected {
-			selected = append(selected, it)
-		}
+	result := Result{Action: fm.action}
+	if fm.action == ActionUpgradeOne && fm.cursor < len(fm.items) {
+		result.Item = fm.items[fm.cursor]
 	}
-	return Result{Selected: selected, Upgrade: fm.upgrade}, nil
+	return result, nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -178,25 +184,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, fetchBody(m.cursor, *it)
 			}
 
-		case " ":
-			if len(m.items) > 0 {
-				m.items[m.cursor].Selected = !m.items[m.cursor].Selected
-			}
-
 		case "a":
-			allSelected := true
-			for _, it := range m.items {
-				if !it.Selected {
-					allSelected = false
-					break
-				}
-			}
-			for i := range m.items {
-				m.items[i].Selected = !allSelected
-			}
+			m.action = ActionUpgradeAll
+			return m, tea.Quit
 
 		case "u":
-			m.upgrade = true
+			if len(m.items) == 0 {
+				return m, nil
+			}
+			m.action = ActionUpgradeOne
 			return m, tea.Quit
 		}
 
@@ -221,9 +217,7 @@ func (m model) View() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(styleHeader.Render(fmt.Sprintf("%d outdated package(s)", len(m.items))))
-	b.WriteString("\n")
-	b.WriteString(styleDim.Render("↑/↓ navigate · enter expand/collapse · space select · a select all · u upgrade selected · q quit"))
+	b.WriteString(styleHeader.Render("Outdated packages:"))
 	b.WriteString("\n\n")
 
 	for i, it := range m.items {
@@ -232,18 +226,13 @@ func (m model) View() string {
 			cursor = styleArrow.Render("> ")
 		}
 
-		checkbox := styleUnselect.Render("[ ]")
-		if it.Selected {
-			checkbox = styleSelected.Render("[x]")
-		}
-
 		sourceHint := styleDim.Render("[no changelog source]")
 		if it.Owner != "" {
 			sourceHint = styleDim.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
 		}
 
-		line := fmt.Sprintf("%s%s %s (%s)  %s -> %s  %s",
-			cursor, checkbox, it.Name, it.Kind,
+		line := fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
+			cursor, it.Name, it.Kind,
 			styleVersion.Render(it.Installed), styleVersion.Render(it.Current),
 			sourceHint)
 		b.WriteString(line)
@@ -263,6 +252,9 @@ func (m model) View() string {
 			b.WriteString("\n")
 		}
 	}
+
+	b.WriteString("\n")
+	b.WriteString(styleDim.Render("[↑/↓] move  [enter] expand/collapse  [a] upgrade all  [u] upgrade current  [q] quit"))
 
 	return b.String()
 }
