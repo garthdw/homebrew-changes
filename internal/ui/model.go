@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -73,8 +74,6 @@ type model struct {
 	spinner   spinner.Model
 	viewport  viewport.Model
 	ready     bool
-	width     int
-	height    int
 	quitting  bool
 	action    Action
 	itemLines []int // line offset of each item's header within the rendered content
@@ -129,7 +128,7 @@ func fetchBody(index int, it Item) tea.Cmd {
 			sourceLabel = "(from GitHub releases)"
 			var b strings.Builder
 			for _, r := range releases {
-				fmt.Fprintf(&b, "### %s (%s)\n\n%s\n\n", r.TagName, orUnknown(r.PublishedAt), orPlaceholder(r.Body))
+				fmt.Fprintf(&b, "### %s (%s)\n\n%s\n\n", r.TagName, cmp.Or(r.PublishedAt, "unknown date"), cmp.Or(r.Body, "_no release notes_"))
 			}
 			raw = b.String()
 		} else {
@@ -139,20 +138,6 @@ func fetchBody(index int, it Item) tea.Cmd {
 		rendered := renderMarkdown(raw)
 		return bodyFetchedMsg{index: index, body: sourceLabel + "\n\n" + rendered}
 	}
-}
-
-func orUnknown(s string) string {
-	if s == "" {
-		return "unknown date"
-	}
-	return s
-}
-
-func orPlaceholder(s string) string {
-	if s == "" {
-		return "_no release notes_"
-	}
-	return s
 }
 
 func renderMarkdown(raw string) string {
@@ -190,8 +175,6 @@ func (m *model) scrollToCursor() {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
 		vpHeight := msg.Height - headerLines - footerLines
 		if vpHeight < 1 {
 			vpHeight = 1

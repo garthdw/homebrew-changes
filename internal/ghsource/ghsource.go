@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var changelogFilenames = []string{"CHANGELOG.md", "CHANGES.md", "HISTORY.md", "NEWS.md", "CHANGELOG"}
@@ -36,22 +37,31 @@ func repoFromURL(url string) (owner, repo string, ok bool) {
 	return m[1], m[2], true
 }
 
+var (
+	tokenOnce  sync.Once
+	tokenValue string
+)
+
 // token returns a GitHub API token, preferring GITHUB_TOKEN/GH_TOKEN, then
 // falling back to `gh auth token` if the gh CLI happens to be available.
 // Returns "" if no token could be found (requests proceed unauthenticated).
+// The result is resolved once per process and cached, since it can require
+// spawning the gh CLI and doesn't change during a run.
 func token() string {
-	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
-		if v := os.Getenv(env); v != "" {
-			return v
+	tokenOnce.Do(func() {
+		for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+			if v := os.Getenv(env); v != "" {
+				tokenValue = v
+				return
+			}
 		}
-	}
-	if _, err := exec.LookPath("gh"); err == nil {
-		out, err := exec.Command("gh", "auth", "token").Output()
-		if err == nil {
-			return strings.TrimSpace(string(out))
+		if _, err := exec.LookPath("gh"); err == nil {
+			if out, err := exec.Command("gh", "auth", "token").Output(); err == nil {
+				tokenValue = strings.TrimSpace(string(out))
+			}
 		}
-	}
-	return ""
+	})
+	return tokenValue
 }
 
 func get(url string) (*http.Response, error) {
@@ -111,10 +121,11 @@ const maxReleasePages = 3
 // capped at a reasonable count. Tag names are compared with a leading "v"
 // stripped so "v1.2.3" and "1.2.3" match.
 func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
-	var all []Release
+	normalizedInstalled := strings.TrimPrefix(installedVersion, "v")
+	var filtered []Release
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100", owner, repo)
 
-	for page := 0; page < maxReleasePages && url != ""; page++ {
+	for page := 0; page < maxReleasePages && url != "" && len(filtered) < 20; page++ {
 		resp, err := get(url)
 		if err != nil {
 			return nil, fmt.Errorf("fetching releases for %s/%s: %w", owner, repo, err)
@@ -132,21 +143,17 @@ func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
 		if err := json.Unmarshal(body, &pageReleases); err != nil {
 			return nil, fmt.Errorf("parsing releases for %s/%s: %w", owner, repo, err)
 		}
-		all = append(all, pageReleases...)
+		for _, r := range pageReleases {
+			if strings.TrimPrefix(r.TagName, "v") == normalizedInstalled {
+				continue
+			}
+			filtered = append(filtered, r)
+			if len(filtered) >= 20 {
+				break
+			}
+		}
 
 		url = nextPageURL(resp.Header.Get("Link"))
-	}
-
-	normalizedInstalled := strings.TrimPrefix(installedVersion, "v")
-	var filtered []Release
-	for _, r := range all {
-		if strings.TrimPrefix(r.TagName, "v") == normalizedInstalled {
-			continue
-		}
-		filtered = append(filtered, r)
-		if len(filtered) >= 20 {
-			break
-		}
 	}
 
 	return filtered, nil

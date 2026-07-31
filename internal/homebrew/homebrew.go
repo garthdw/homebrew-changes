@@ -60,31 +60,30 @@ func Outdated() ([]Package, error) {
 
 	packages := make([]Package, 0, len(result.Formulae)+len(result.Casks))
 	for _, f := range result.Formulae {
-		installed := ""
-		if len(f.InstalledVersions) > 0 {
-			installed = f.InstalledVersions[0]
-		}
 		packages = append(packages, Package{
 			Name:      f.Name,
-			Installed: installed,
+			Installed: firstOrEmpty(f.InstalledVersions),
 			Current:   f.CurrentVersion,
 			IsCask:    false,
 		})
 	}
 	for _, c := range result.Casks {
-		installed := ""
-		if len(c.InstalledVersions) > 0 {
-			installed = c.InstalledVersions[0]
-		}
 		packages = append(packages, Package{
 			Name:      c.Name,
-			Installed: installed,
+			Installed: firstOrEmpty(c.InstalledVersions),
 			Current:   c.CurrentVersion,
 			IsCask:    true,
 		})
 	}
 
 	return packages, nil
+}
+
+func firstOrEmpty(versions []string) string {
+	if len(versions) > 0 {
+		return versions[0]
+	}
+	return ""
 }
 
 type formulaInfo struct {
