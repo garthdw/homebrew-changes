@@ -12,12 +12,10 @@ GitHub Releases, then upgrade everything or just the one you're looking at.
 ## Install
 
 ```sh
-brew install garthdw/changes/brew-changes --HEAD
+brew install garthdw/changes/brew-changes
 ```
 
-There's no tagged release yet, so `--HEAD` (build from the latest commit) is
-required for now. Homebrew will build the Go binary from source — this
-requires Go, which the formula pulls in automatically as a build dependency.
+This installs a prebuilt binary — no Go toolchain required.
 
 ## Usage
 
@@ -63,3 +61,11 @@ export GITHUB_TOKEN=ghp_...   # or GH_TOKEN
 If you have the [`gh`](https://cli.github.com) CLI installed and authenticated
 (`gh auth login`), `brew changes` will use its token automatically as a
 fallback when neither environment variable is set.
+
+## Releasing
+
+Publishing a GitHub Release (with a `vX.Y.Z` tag) triggers
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which runs
+[GoReleaser](https://goreleaser.com) to build macOS binaries (arm64 + amd64)
+and attach them to the release, then auto-commits the regenerated
+`Formula/brew-changes.rb` to `main` with the new version/url/sha256.
