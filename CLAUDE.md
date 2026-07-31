@@ -13,9 +13,8 @@ go build ./...              # build everything
 go vet ./...                 # static checks
 gofmt -l .                   # list files needing formatting (fix with gofmt -w)
 go run ./cmd/brew-changes    # run the TUI locally
+go test ./...                # run unit tests
 ```
-
-There are no Go tests in this repo currently.
 
 ### Release validation (GoReleaser)
 

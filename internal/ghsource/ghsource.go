@@ -17,6 +17,9 @@ import (
 
 var changelogFilenames = []string{"CHANGELOG.md", "CHANGES.md", "HISTORY.md", "NEWS.md", "CHANGELOG"}
 
+// apiBaseURL is the GitHub REST API base, overridable in tests.
+var apiBaseURL = "https://api.github.com"
+
 var githubURLPattern = regexp.MustCompile(`github\.com[:/]([^/]+)/([^/.]+)(\.git)?(/.*)?$`)
 
 // ResolveRepo extracts "owner" and "repo" from a URL pointing at
@@ -84,7 +87,7 @@ type contentsResponse struct {
 // the repo's default branch, returning the first one found.
 func FetchChangelogFile(owner, repo string) (filename, content string, ok bool) {
 	for _, name := range changelogFilenames {
-		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, name)
+		url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", apiBaseURL, owner, repo, name)
 		resp, err := get(url)
 		if err != nil {
 			continue
@@ -123,7 +126,7 @@ const maxReleasePages = 3
 func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
 	normalizedInstalled := strings.TrimPrefix(installedVersion, "v")
 	var filtered []Release
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100", owner, repo)
+	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", apiBaseURL, owner, repo)
 
 	for page := 0; page < maxReleasePages && url != "" && len(filtered) < 20; page++ {
 		resp, err := get(url)

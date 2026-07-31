@@ -1,0 +1,289 @@
+package ui
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func testItems(n int) []Item {
+	items := make([]Item, n)
+	for i := range items {
+		items[i] = Item{Name: "pkg", Kind: "formula", Installed: "1.0", Current: "2.0"}
+	}
+	return items
+}
+
+func readyModel(items []Item) model {
+	m := newModel(items)
+	m.viewport = viewport.New(80, 10)
+	m.ready = true
+	m.refreshViewport()
+	return m
+}
+
+func TestMoveCursor_ClampsAtBounds(t *testing.T) {
+	m := readyModel(testItems(3))
+
+	m.moveCursor(-5)
+	if m.cursor != 0 {
+		t.Errorf("moving past the start: got cursor %d, want 0", m.cursor)
+	}
+
+	m.moveCursor(10)
+	if m.cursor != 2 {
+		t.Errorf("moving past the end: got cursor %d, want 2", m.cursor)
+	}
+}
+
+func TestMoveCursor_EmptyList(t *testing.T) {
+	m := readyModel(nil)
+	m.moveCursor(1)
+	if m.cursor != 0 {
+		t.Errorf("got cursor %d, want 0", m.cursor)
+	}
+}
+
+func TestUpdate_ArrowKeysMoveCursor(t *testing.T) {
+	m := readyModel(testItems(3))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	nm := updated.(model)
+	if nm.cursor != 1 {
+		t.Errorf("got cursor %d, want 1", nm.cursor)
+	}
+
+	updated, _ = nm.Update(tea.KeyMsg{Type: tea.KeyUp})
+	nm = updated.(model)
+	if nm.cursor != 0 {
+		t.Errorf("got cursor %d, want 0", nm.cursor)
+	}
+}
+
+func TestUpdate_JKMoveCursorWhenCollapsed(t *testing.T) {
+	m := readyModel(testItems(3))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	nm := updated.(model)
+	if nm.cursor != 1 {
+		t.Errorf("'j' on collapsed item: got cursor %d, want 1", nm.cursor)
+	}
+
+	updated, _ = nm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	nm = updated.(model)
+	if nm.cursor != 0 {
+		t.Errorf("'k' on collapsed item: got cursor %d, want 0", nm.cursor)
+	}
+}
+
+func TestUpdate_JKScrollWhenExpanded(t *testing.T) {
+	m := readyModel(testItems(1))
+	m.items[0].Expanded = true
+	m.items[0].Body = strings.Repeat("line\n", 50)
+	m.refreshViewport()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	nm := updated.(model)
+	if nm.cursor != 0 {
+		t.Errorf("'j' on expanded item should scroll, not move cursor: got cursor %d", nm.cursor)
+	}
+	if nm.viewport.YOffset == 0 {
+		t.Error("'j' on expanded item should scroll the viewport down")
+	}
+}
+
+func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
+	m := readyModel(testItems(1))
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := updated.(model)
+	if !nm.items[0].Expanded {
+		t.Error("expected item to be expanded after enter")
+	}
+	if !nm.items[0].Loading {
+		t.Error("expected item to be marked loading since body is empty")
+	}
+	if cmd == nil {
+		t.Error("expected a fetch command to be returned")
+	}
+
+	// Collapsing again shouldn't trigger another fetch.
+	updated, cmd = nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm2 := updated.(model)
+	if nm2.items[0].Expanded {
+		t.Error("expected item to be collapsed after second enter")
+	}
+	if cmd != nil {
+		t.Error("expected no fetch command when collapsing")
+	}
+}
+
+func TestUpdate_EnterOnEmptyList(t *testing.T) {
+	m := readyModel(nil)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("expected no command on empty list")
+	}
+	if len(updated.(model).items) != 0 {
+		t.Error("expected items to remain empty")
+	}
+}
+
+func TestUpdate_BodyFetchedMsg(t *testing.T) {
+	m := readyModel(testItems(2))
+	m.items[0].Loading = true
+
+	updated, _ := m.Update(bodyFetchedMsg{index: 0, body: "changelog content"})
+	nm := updated.(model)
+	if nm.items[0].Body != "changelog content" {
+		t.Errorf("got body %q", nm.items[0].Body)
+	}
+	if nm.items[0].Loading {
+		t.Error("expected Loading to be cleared")
+	}
+}
+
+func TestUpdate_BodyFetchedMsg_OutOfRangeIndexIgnored(t *testing.T) {
+	m := readyModel(testItems(1))
+	updated, _ := m.Update(bodyFetchedMsg{index: 5, body: "x"})
+	if len(updated.(model).items) != 1 {
+		t.Error("out-of-range index should be a no-op, not panic or mutate")
+	}
+}
+
+func TestUpdate_QuitActionsSetCorrectly(t *testing.T) {
+	tests := []struct {
+		name string
+		key  tea.KeyMsg
+		want Action
+	}{
+		{"a upgrades all", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}, ActionUpgradeAll},
+		{"u upgrades one", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")}, ActionUpgradeOne},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := readyModel(testItems(2))
+			updated, cmd := m.Update(tt.key)
+			nm := updated.(model)
+			if nm.action != tt.want {
+				t.Errorf("got action %v, want %v", nm.action, tt.want)
+			}
+			if cmd == nil {
+				t.Error("expected tea.Quit command")
+			}
+		})
+	}
+}
+
+func TestUpdate_QuitOnEmptyListStillQuits(t *testing.T) {
+	m := readyModel(nil)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	if cmd != nil {
+		t.Error("'u' on an empty list should not quit with a command")
+	}
+	if updated.(model).action != ActionNone {
+		t.Error("expected action to remain ActionNone on empty list")
+	}
+}
+
+func TestRenderList_MarksCursorAndExpandedBody(t *testing.T) {
+	items := []Item{
+		{Name: "alpha", Kind: "formula", Installed: "1.0", Current: "2.0"},
+		{Name: "beta", Kind: "cask", Installed: "1.0", Current: "2.0", Expanded: true, Body: "release notes"},
+	}
+	m := newModel(items)
+	m.cursor = 1
+
+	content, itemLines := m.renderList()
+
+	if !strings.Contains(content, "alpha") || !strings.Contains(content, "beta") {
+		t.Errorf("expected both items in rendered content, got %q", content)
+	}
+	if !strings.Contains(content, "release notes") {
+		t.Error("expected expanded item's body to be rendered")
+	}
+	if len(itemLines) != 2 {
+		t.Fatalf("got %d item line offsets, want 2", len(itemLines))
+	}
+	if itemLines[0] != 0 {
+		t.Errorf("first item should start at line 0, got %d", itemLines[0])
+	}
+	if itemLines[1] <= itemLines[0] {
+		t.Errorf("second item's offset (%d) should be after the first's (%d)", itemLines[1], itemLines[0])
+	}
+}
+
+func TestRenderList_LoadingShowsSpinner(t *testing.T) {
+	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true}}
+	m := newModel(items)
+
+	content, _ := m.renderList()
+	if !strings.Contains(content, "fetching changelog") {
+		t.Errorf("expected loading indicator in content, got %q", content)
+	}
+}
+
+func TestScrollToCursor_ScrollsDownWhenBelowViewport(t *testing.T) {
+	m := readyModel(testItems(20))
+	m.viewport.Height = 5
+	m.viewport.SetContent(strings.Repeat("line\n", 100))
+	m.itemLines = make([]int, 20)
+	for i := range m.itemLines {
+		m.itemLines[i] = i * 3
+	}
+
+	m.cursor = 19
+	m.scrollToCursor()
+
+	target := m.itemLines[19]
+	if m.viewport.YOffset != target-m.viewport.Height+1 {
+		t.Errorf("got YOffset %d, want %d", m.viewport.YOffset, target-m.viewport.Height+1)
+	}
+}
+
+func TestScrollToCursor_ScrollsUpWhenAboveViewport(t *testing.T) {
+	m := readyModel(testItems(20))
+	m.viewport.Height = 5
+	m.itemLines = make([]int, 20)
+	for i := range m.itemLines {
+		m.itemLines[i] = i * 3
+	}
+	m.viewport.SetYOffset(30)
+
+	m.cursor = 0
+	m.scrollToCursor()
+
+	if m.viewport.YOffset != 0 {
+		t.Errorf("got YOffset %d, want 0", m.viewport.YOffset)
+	}
+}
+
+func TestWindowSizeMsg_SetsViewportDimensions(t *testing.T) {
+	m := newModel(testItems(2))
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	nm := updated.(model)
+
+	if !nm.ready {
+		t.Fatal("expected model to be ready after WindowSizeMsg")
+	}
+	wantHeight := 20 - headerLines - footerLines
+	if nm.viewport.Height != wantHeight {
+		t.Errorf("got viewport height %d, want %d", nm.viewport.Height, wantHeight)
+	}
+	if nm.viewport.Width != 100 {
+		t.Errorf("got viewport width %d, want 100", nm.viewport.Width)
+	}
+}
+
+func TestWindowSizeMsg_ClampsTinyHeightToOne(t *testing.T) {
+	m := newModel(testItems(1))
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 1})
+	nm := updated.(model)
+
+	if nm.viewport.Height != 1 {
+		t.Errorf("got viewport height %d, want 1 (clamped)", nm.viewport.Height)
+	}
+}
