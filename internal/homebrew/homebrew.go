@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // Package is an outdated formula or cask.
@@ -149,15 +150,28 @@ func ResolveInfo(name string, isCask bool) (homepage, url string, err error) {
 }
 
 // Upgrade runs `brew upgrade` for the named formulae and/or `brew upgrade
-// --cask` for the named casks.
+// --cask` for the named casks, streaming brew's output to the terminal.
+// Only safe to call when nothing else owns the terminal (e.g. after a TUI
+// has quit) — use UpgradeQuiet otherwise.
 func Upgrade(formulaNames, caskNames []string) error {
+	return upgrade(run, formulaNames, caskNames)
+}
+
+// UpgradeQuiet behaves like Upgrade but captures brew's output instead of
+// streaming it to the terminal, for callers that don't own the terminal
+// (e.g. a Bubble Tea UI still running in alt-screen mode).
+func UpgradeQuiet(formulaNames, caskNames []string) error {
+	return upgrade(runCaptured, formulaNames, caskNames)
+}
+
+func upgrade(runFn func(name string, args ...string) error, formulaNames, caskNames []string) error {
 	if len(formulaNames) > 0 {
-		if err := run("brew", append([]string{"upgrade"}, formulaNames...)...); err != nil {
+		if err := runFn("brew", append([]string{"upgrade"}, formulaNames...)...); err != nil {
 			return err
 		}
 	}
 	if len(caskNames) > 0 {
-		if err := run("brew", append([]string{"upgrade", "--cask"}, caskNames...)...); err != nil {
+		if err := runFn("brew", append([]string{"upgrade", "--cask"}, caskNames...)...); err != nil {
 			return err
 		}
 	}
@@ -170,6 +184,15 @@ func run(name string, args ...string) error {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s %v: %w", name, args, err)
+	}
+	return nil
+}
+
+func runCaptured(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %v: %w: %s", name, args, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

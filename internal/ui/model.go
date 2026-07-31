@@ -15,6 +15,7 @@ import (
 
 	"github.com/garthdw/homebrew-changes/internal/changelog"
 	"github.com/garthdw/homebrew-changes/internal/ghsource"
+	"github.com/garthdw/homebrew-changes/internal/homebrew"
 )
 
 // Item is one outdated package in the list.
@@ -29,6 +30,13 @@ type Item struct {
 	Expanded bool
 	Loading  bool
 	Body     string // rendered changelog/releases content, empty until fetched
+
+	// Upgrading, Upgraded, and UpgradeErr track an in-place single-package
+	// upgrade triggered by the "u" key; unlike ActionUpgradeAll, this
+	// happens without quitting the list so the changelog stays browsable.
+	Upgrading  bool
+	Upgraded   bool
+	UpgradeErr string
 }
 
 // Action is what the user asked to do when they quit the list.
@@ -39,15 +47,14 @@ const (
 	ActionNone Action = iota
 	// ActionUpgradeAll means every outdated package should be upgraded.
 	ActionUpgradeAll
-	// ActionUpgradeOne means only the hovered package should be upgraded.
-	ActionUpgradeOne
 )
 
-// Result is returned by Run: what the user asked to do, and (for
-// ActionUpgradeOne) which package.
+// Result is returned by Run: what the user asked to do when they quit, and
+// the final state of every item (reflecting any in-place single-package
+// upgrades performed via the "u" key before quitting).
 type Result struct {
 	Action Action
-	Item   Item
+	Items  []Item
 }
 
 var (
@@ -56,6 +63,7 @@ var (
 	styleDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	styleHeader    = lipgloss.NewStyle().Bold(true)
 	styleSelected  = lipgloss.NewStyle().Bold(true)
+	styleError     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	styleBodyFrame = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
@@ -96,12 +104,7 @@ func Run(items []Item) (Result, error) {
 		return Result{}, err
 	}
 	fm := finalModel.(model)
-
-	result := Result{Action: fm.action}
-	if fm.action == ActionUpgradeOne && fm.cursor < len(fm.items) {
-		result.Item = fm.items[fm.cursor]
-	}
-	return result, nil
+	return Result{Action: fm.action, Items: fm.items}, nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -137,6 +140,23 @@ func fetchBody(index int, it Item) tea.Cmd {
 
 		rendered := renderMarkdown(raw)
 		return bodyFetchedMsg{index: index, body: sourceLabel + "\n\n" + rendered}
+	}
+}
+
+type upgradeDoneMsg struct {
+	index int
+	err   error
+}
+
+func upgradePackage(index int, it Item) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		if it.Kind == "cask" {
+			err = homebrew.UpgradeQuiet(nil, []string{it.Name})
+		} else {
+			err = homebrew.UpgradeQuiet([]string{it.Name}, nil)
+		}
+		return upgradeDoneMsg{index: index, err: err}
 	}
 }
 
@@ -243,8 +263,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.items) == 0 {
 				return m, nil
 			}
-			m.action = ActionUpgradeOne
-			return m, tea.Quit
+			it := &m.items[m.cursor]
+			if it.Upgraded || it.Upgrading {
+				return m, nil
+			}
+			it.Upgrading = true
+			it.UpgradeErr = ""
+			m.refreshViewport()
+			m.scrollToCursor()
+			return m, upgradePackage(m.cursor, *it)
 		}
 
 	case bodyFetchedMsg:
@@ -254,11 +281,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 		}
 
+	case upgradeDoneMsg:
+		if msg.index >= 0 && msg.index < len(m.items) {
+			it := &m.items[msg.index]
+			it.Upgrading = false
+			if msg.err != nil {
+				it.UpgradeErr = msg.err.Error()
+			} else {
+				it.Upgraded = true
+			}
+			m.refreshViewport()
+		}
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if len(m.items) > 0 && m.items[m.cursor].Loading {
-			m.refreshViewport()
+		for _, it := range m.items {
+			if it.Loading || it.Upgrading {
+				m.refreshViewport()
+				break
+			}
 		}
 		return m, cmd
 	}
@@ -327,12 +369,28 @@ func (m model) renderList() (string, []int) {
 			sourceHint = styleDim.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
 		}
 
-		line := fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
-			cursor, it.Name, it.Kind,
-			styleVersion.Render(it.Installed), styleVersion.Render(it.Current),
-			sourceHint)
-		if i == m.cursor && !it.Expanded {
-			line = styleSelected.Render(line)
+		var statusTag string
+		switch {
+		case it.Upgraded:
+			statusTag = "  " + styleDim.Render("[upgraded]")
+		case it.Upgrading:
+			statusTag = "  " + m.spinner.View() + " upgrading..."
+		case it.UpgradeErr != "":
+			statusTag = "  " + styleError.Render("[upgrade failed]")
+		}
+
+		var line string
+		if it.Upgraded {
+			line = styleDim.Render(fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
+				cursor, it.Name, it.Kind, it.Installed, it.Current, sourceHint)) + statusTag
+		} else {
+			line = fmt.Sprintf("%s%s (%s)  %s -> %s  %s%s",
+				cursor, it.Name, it.Kind,
+				styleVersion.Render(it.Installed), styleVersion.Render(it.Current),
+				sourceHint, statusTag)
+			if i == m.cursor && !it.Expanded {
+				line = styleSelected.Render(line)
+			}
 		}
 		writeLine(line)
 

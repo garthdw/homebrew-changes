@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -153,39 +154,98 @@ func TestUpdate_BodyFetchedMsg_OutOfRangeIndexIgnored(t *testing.T) {
 	}
 }
 
-func TestUpdate_QuitActionsSetCorrectly(t *testing.T) {
+func TestUpdate_AKeyQuitsWithUpgradeAll(t *testing.T) {
+	m := readyModel(testItems(2))
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	nm := updated.(model)
+	if nm.action != ActionUpgradeAll {
+		t.Errorf("got action %v, want ActionUpgradeAll", nm.action)
+	}
+	if cmd == nil {
+		t.Error("expected tea.Quit command")
+	}
+}
+
+func TestUpdate_UKeyStartsInPlaceUpgradeWithoutQuitting(t *testing.T) {
+	m := readyModel(testItems(2))
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	nm := updated.(model)
+
+	if nm.action != ActionNone {
+		t.Errorf("'u' should not set a quit action, got %v", nm.action)
+	}
+	if !nm.items[0].Upgrading {
+		t.Error("expected the hovered item to be marked Upgrading")
+	}
+	if cmd == nil {
+		t.Error("expected an upgrade command to be returned")
+	}
+}
+
+func TestUpdate_UKeyNoopOnEmptyList(t *testing.T) {
+	m := readyModel(nil)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	if cmd != nil {
+		t.Error("'u' on an empty list should return no command")
+	}
+	if updated.(model).action != ActionNone {
+		t.Error("expected action to remain ActionNone on empty list")
+	}
+}
+
+func TestUpdate_UKeyNoopWhenAlreadyUpgradedOrUpgrading(t *testing.T) {
 	tests := []struct {
 		name string
-		key  tea.KeyMsg
-		want Action
+		item Item
 	}{
-		{"a upgrades all", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}, ActionUpgradeAll},
-		{"u upgrades one", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")}, ActionUpgradeOne},
+		{"already upgraded", Item{Upgraded: true}},
+		{"already upgrading", Item{Upgrading: true}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := readyModel(testItems(2))
-			updated, cmd := m.Update(tt.key)
-			nm := updated.(model)
-			if nm.action != tt.want {
-				t.Errorf("got action %v, want %v", nm.action, tt.want)
-			}
-			if cmd == nil {
-				t.Error("expected tea.Quit command")
+			m := readyModel([]Item{tt.item})
+			_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+			if cmd != nil {
+				t.Error("expected no command when the item is already upgraded or upgrading")
 			}
 		})
 	}
 }
 
-func TestUpdate_QuitOnEmptyListStillQuits(t *testing.T) {
-	m := readyModel(nil)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
-	if cmd != nil {
-		t.Error("'u' on an empty list should not quit with a command")
+func TestUpdate_UpgradeDoneMsg_Success(t *testing.T) {
+	m := readyModel(testItems(1))
+	m.items[0].Upgrading = true
+
+	updated, _ := m.Update(upgradeDoneMsg{index: 0, err: nil})
+	nm := updated.(model)
+	if nm.items[0].Upgrading {
+		t.Error("expected Upgrading to be cleared")
 	}
-	if updated.(model).action != ActionNone {
-		t.Error("expected action to remain ActionNone on empty list")
+	if !nm.items[0].Upgraded {
+		t.Error("expected Upgraded to be set on success")
+	}
+}
+
+func TestUpdate_UpgradeDoneMsg_Failure(t *testing.T) {
+	m := readyModel(testItems(1))
+	m.items[0].Upgrading = true
+
+	updated, _ := m.Update(upgradeDoneMsg{index: 0, err: errors.New("brew upgrade: boom")})
+	nm := updated.(model)
+	if nm.items[0].Upgraded {
+		t.Error("expected Upgraded to remain false on failure")
+	}
+	if nm.items[0].UpgradeErr == "" {
+		t.Error("expected UpgradeErr to be set on failure")
+	}
+}
+
+func TestUpdate_UpgradeDoneMsg_OutOfRangeIndexIgnored(t *testing.T) {
+	m := readyModel(testItems(1))
+	updated, _ := m.Update(upgradeDoneMsg{index: 5, err: nil})
+	if len(updated.(model).items) != 1 {
+		t.Error("out-of-range index should be a no-op, not panic or mutate")
 	}
 }
 
@@ -213,6 +273,29 @@ func TestRenderList_MarksCursorAndExpandedBody(t *testing.T) {
 	}
 	if itemLines[1] <= itemLines[0] {
 		t.Errorf("second item's offset (%d) should be after the first's (%d)", itemLines[1], itemLines[0])
+	}
+}
+
+func TestRenderList_UpgradedItemShowsTagAndAllowsExpand(t *testing.T) {
+	items := []Item{{Name: "alpha", Kind: "formula", Upgraded: true, Expanded: true, Body: "changelog body"}}
+	m := newModel(items)
+
+	content, _ := m.renderList()
+	if !strings.Contains(content, "upgraded") {
+		t.Errorf("expected an [upgraded] tag in rendered content, got %q", content)
+	}
+	if !strings.Contains(content, "changelog body") {
+		t.Error("expected the changelog body to still be viewable for an upgraded item")
+	}
+}
+
+func TestRenderList_UpgradingShowsIndicator(t *testing.T) {
+	items := []Item{{Name: "alpha", Kind: "formula", Upgrading: true}}
+	m := newModel(items)
+
+	content, _ := m.renderList()
+	if !strings.Contains(content, "upgrading") {
+		t.Errorf("expected an upgrading indicator in rendered content, got %q", content)
 	}
 }
 

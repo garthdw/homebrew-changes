@@ -58,26 +58,27 @@ func run() error {
 		return err
 	}
 
-	var toUpgrade []ui.Item
-	switch result.Action {
-	case ui.ActionUpgradeAll:
-		toUpgrade = items
-	case ui.ActionUpgradeOne:
-		toUpgrade = []ui.Item{result.Item}
-	default:
+	if result.Action != ui.ActionUpgradeAll {
 		fmt.Println("No packages upgraded.")
 		return nil
 	}
 
 	var formulaNames, caskNames []string
-	for _, it := range toUpgrade {
+	for _, it := range result.Items {
+		if it.Upgraded {
+			continue // already upgraded in-place before quitting
+		}
 		if it.Kind == "cask" {
 			caskNames = append(caskNames, it.Name)
 		} else {
 			formulaNames = append(formulaNames, it.Name)
 		}
 	}
+	if len(formulaNames) == 0 && len(caskNames) == 0 {
+		fmt.Println("Everything is already upgraded.")
+		return nil
+	}
 
-	fmt.Printf("Upgrading %d package(s)...\n", len(toUpgrade))
+	fmt.Printf("Upgrading %d package(s)...\n", len(formulaNames)+len(caskNames))
 	return homebrew.Upgrade(formulaNames, caskNames)
 }
