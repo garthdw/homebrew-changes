@@ -5,6 +5,7 @@ package ui
 import (
 	"cmp"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -24,6 +25,7 @@ type Item struct {
 	Kind      string // "formula" or "cask"
 	Installed string
 	Current   string
+	Homepage  string // package homepage, empty if unknown
 	Owner     string // GitHub owner, empty if no repo could be resolved
 	Repo      string // GitHub repo name
 
@@ -160,6 +162,14 @@ func upgradePackage(index int, it Item) tea.Cmd {
 	}
 }
 
+// openURL opens url in the user's default browser via macOS's `open`.
+func openURL(url string) tea.Cmd {
+	return func() tea.Msg {
+		_ = exec.Command("open", url).Start()
+		return nil
+	}
+}
+
 func renderMarkdown(raw string) string {
 	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(96))
 	if err != nil {
@@ -224,6 +234,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveCursor(1)
 			m.refreshViewport()
 
+		case "K":
+			m.moveCursor(-1)
+			m.refreshViewport()
+
+		case "J":
+			m.moveCursor(1)
+			m.refreshViewport()
+
 		case "k":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
 				m.viewport.ScrollUp(1)
@@ -254,6 +272,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.refreshViewport()
 			m.scrollToCursor()
+
+		case "o":
+			if len(m.items) == 0 {
+				return m, nil
+			}
+			it := m.items[m.cursor]
+			url := it.Homepage
+			if url == "" && it.Owner != "" {
+				url = fmt.Sprintf("https://github.com/%s/%s", it.Owner, it.Repo)
+			}
+			if url == "" {
+				return m, nil
+			}
+			return m, openURL(url)
 
 		case "a":
 			m.action = ActionUpgradeAll
@@ -336,7 +368,7 @@ func (m model) View() string {
 	b.WriteString("\n\n")
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n\n")
-	b.WriteString(styleDim.Render("[↑/↓, j/k] move  [enter] expand/collapse  [j/k] scroll changelog when expanded  [a] upgrade all  [u] upgrade current  [q] quit"))
+	b.WriteString(styleDim.Render("[↑/↓, j/k, J/K] move  [enter] expand/collapse [o] open homepage  [a] upgrade all  [u] upgrade current  [q] quit"))
 
 	return b.String()
 }

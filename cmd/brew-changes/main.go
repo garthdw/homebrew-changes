@@ -48,6 +48,7 @@ func run() error {
 			Kind:      kind,
 			Installed: pkg.Installed,
 			Current:   pkg.Current,
+			Homepage:  homepage,
 			Owner:     owner,
 			Repo:      repo,
 		})
