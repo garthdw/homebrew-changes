@@ -206,7 +206,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "k":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
-				m.viewport.LineUp(1)
+				m.viewport.ScrollUp(1)
 			} else {
 				m.moveCursor(-1)
 				m.refreshViewport()
@@ -214,7 +214,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "j":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
-				m.viewport.LineDown(1)
+				m.viewport.ScrollDown(1)
 			} else {
 				m.moveCursor(1)
 				m.refreshViewport()
