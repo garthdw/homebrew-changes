@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+#
+# brew-changes: show changelogs/release notes for every outdated Homebrew
+# package (formulae + casks) before optionally upgrading them.
+
+set -euo pipefail
+
+MAX_CONTENT_LINES=100
+CHANGELOG_FILENAMES=(CHANGELOG.md CHANGES.md HISTORY.md NEWS.md CHANGELOG)
+
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+RESET=$'\033[0m'
+GREEN=$'\033[32m'
+YELLOW=$'\033[33m'
+RED=$'\033[31m'
+
+die() {
+  echo "${RED}error:${RESET} $1" >&2
+  exit 1
+}
+
+check_deps() {
+  command -v jq >/dev/null 2>&1 || die "jq is required. Install with: brew install jq"
+  command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required. Install with: brew install gh"
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
+}
+
+# Extract "owner/repo" from a URL if it points at github.com, else empty.
+github_repo_from_url() {
+  local url="$1"
+  if [[ "$url" =~ github\.com[:/]([^/]+)/([^/.]+)(\.git)?(/.*)?$ ]]; then
+    echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  fi
+}
+
+# Resolve a package name to a github "owner/repo", trying homepage then
+# source/download URL. Prints nothing if no GitHub repo can be found.
+resolve_github_repo() {
+  local name="$1" is_cask="$2" info repo homepage url
+
+  if [[ "$is_cask" == "true" ]]; then
+    info=$(brew info --json=v2 --cask "$name" 2>/dev/null) || return 0
+    homepage=$(echo "$info" | jq -r '.casks[0].homepage // empty')
+    url=$(echo "$info" | jq -r '.casks[0].url // empty')
+  else
+    info=$(brew info --json=v2 --formula "$name" 2>/dev/null) || return 0
+    homepage=$(echo "$info" | jq -r '.formulae[0].homepage // empty')
+    url=$(echo "$info" | jq -r '.formulae[0].urls.stable.url // .formulae[0].urls.head.url // empty')
+  fi
+
+  repo=$(github_repo_from_url "$homepage")
+  if [[ -z "$repo" ]]; then
+    repo=$(github_repo_from_url "$url")
+  fi
+  echo "$repo"
+}
+
+# Fetch a file's raw content from a repo's default branch via gh api.
+# Prints content on success, returns 1 if not found.
+fetch_repo_file() {
+  local repo="$1" path="$2"
+  gh api "repos/${repo}/contents/${path}" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null
+}
+
+# Try each known changelog filename in turn; print the first one found.
+# Sets CHANGELOG_SOURCE_FILE as a side effect via stdout on line 1... instead
+# we just print "filename\n---\ncontent" so caller can split it.
+fetch_changelog_file() {
+  local repo="$1" filename content
+  for filename in "${CHANGELOG_FILENAMES[@]}"; do
+    content=$(fetch_repo_file "$repo" "$filename") || continue
+    if [[ -n "$content" ]]; then
+      echo "$filename"
+      echo "$content"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Trim a changelog to the section between $new_version and $installed_version
+# headings if both can be located; otherwise return the first N lines.
+trim_changelog() {
+  local content="$1" new_version="$2" installed_version="$3"
+  local start_line end_line total
+
+  start_line=$(grep -nE "^#+.*${new_version//./\\.}" <<<"$content" | head -1 | cut -d: -f1 || true)
+  end_line=$(grep -nE "^#+.*${installed_version//./\\.}" <<<"$content" | head -1 | cut -d: -f1 || true)
+
+  if [[ -n "$start_line" ]]; then
+    if [[ -n "$end_line" && "$end_line" -gt "$start_line" ]]; then
+      sed -n "${start_line},$((end_line - 1))p" <<<"$content"
+      return 0
+    fi
+    total=$(wc -l <<<"$content")
+    sed -n "${start_line},$((start_line + MAX_CONTENT_LINES))p" <<<"$content"
+    if (( total - start_line > MAX_CONTENT_LINES )); then
+      echo "${DIM}... (truncated, showing ${MAX_CONTENT_LINES} lines from the ${new_version} heading)${RESET}"
+    fi
+    return 0
+  fi
+
+  head -n "$MAX_CONTENT_LINES" <<<"$content"
+  echo "${DIM}... (couldn't locate version headings, showing first ${MAX_CONTENT_LINES} lines)${RESET}"
+}
+
+# Fetch GitHub releases between installed_version and new_version (exclusive
+# of installed, inclusive of new), newest first.
+fetch_releases_section() {
+  local repo="$1" new_version="$2" installed_version="$3"
+  local releases
+
+  releases=$(gh api "repos/${repo}/releases" --paginate 2>/dev/null) || return 1
+  [[ "$releases" == "[]" || -z "$releases" ]] && return 1
+
+  echo "$releases" | jq -r --arg new "$new_version" --arg installed "$installed_version" '
+    def norm: sub("^v"; "");
+    map(select((.tag_name | norm) as $t | $t != ($installed | norm)))
+    | .[:20]
+    | .[]
+    | "### " + .tag_name + " (" + (.published_at // "unknown date") + ")\n\n" + (.body // "_no release notes_") + "\n"
+  '
+}
+
+render_package() {
+  local name="$1" is_cask="$2" installed="$3" current="$4"
+  local kind="formula"
+  [[ "$is_cask" == "true" ]] && kind="cask"
+
+  echo ""
+  echo "${BOLD}${name}${RESET} ${DIM}(${kind})${RESET}  ${YELLOW}${installed}${RESET} -> ${GREEN}${current}${RESET}"
+  echo "${DIM}------------------------------------------------------------${RESET}"
+
+  local repo
+  repo=$(resolve_github_repo "$name" "$is_cask")
+
+  if [[ -z "$repo" ]]; then
+    echo "${DIM}No GitHub repository could be resolved for this package; changelog unavailable.${RESET}"
+    return
+  fi
+
+  echo "${DIM}source: github.com/${repo}${RESET}"
+  echo ""
+
+  local result filename content
+  if result=$(fetch_changelog_file "$repo"); then
+    filename=$(head -1 <<<"$result")
+    content=$(tail -n +2 <<<"$result")
+    echo "${DIM}(from ${filename})${RESET}"
+    trim_changelog "$content" "$current" "$installed"
+    return
+  fi
+
+  local releases_section
+  if releases_section=$(fetch_releases_section "$repo" "$current" "$installed") && [[ -n "$releases_section" ]]; then
+    echo "${DIM}(from GitHub releases)${RESET}"
+    echo "$releases_section"
+    return
+  fi
+
+  echo "${DIM}No changelog file or GitHub releases found for this package.${RESET}"
+}
+
+main() {
+  check_deps
+
+  echo "Checking for outdated packages..."
+  local formulae casks combined count
+
+  formulae=$(brew outdated --json=v2 --formula 2>/dev/null | jq '[.formulae[] | {name, installed: .installed_versions[0], current: .current_version, cask: false}]')
+  casks=$(brew outdated --json=v2 --cask 2>/dev/null | jq '[.casks[] | {name: .name, installed: .installed_versions[0], current: .current_version, cask: true}]')
+  combined=$(jq -s 'add' <<<"$formulae"$'\n'"$casks")
+  count=$(jq 'length' <<<"$combined")
+
+  if [[ "$count" -eq 0 ]]; then
+    echo "Everything is up to date."
+    exit 0
+  fi
+
+  echo "Found ${count} outdated package(s). Fetching changelogs..."
+
+  local i entry name installed current is_cask
+  for ((i = 0; i < count; i++)); do
+    entry=$(jq ".[$i]" <<<"$combined")
+    name=$(jq -r '.name' <<<"$entry")
+    installed=$(jq -r '.installed' <<<"$entry")
+    current=$(jq -r '.current' <<<"$entry")
+    is_cask=$(jq -r '.cask' <<<"$entry")
+    render_package "$name" "$is_cask" "$installed" "$current"
+  done
+
+  echo ""
+  echo "${DIM}------------------------------------------------------------${RESET}"
+  local reply
+  read -r -p "Proceed with 'brew upgrade' for all ${count} outdated package(s)? [Y/n] " reply
+  reply=${reply:-Y}
+
+  if [[ "$reply" =~ ^[Nn] ]]; then
+    echo "Skipped upgrade."
+    exit 0
+  fi
+
+  local has_formulae has_casks
+  has_formulae=$(jq '[.[] | select(.cask == false)] | length > 0' <<<"$combined")
+  has_casks=$(jq '[.[] | select(.cask == true)] | length > 0' <<<"$combined")
+
+  if [[ "$has_formulae" == "true" ]]; then
+    brew upgrade
+  fi
+  if [[ "$has_casks" == "true" ]]; then
+    brew upgrade --cask
+  fi
+}
+
+main "$@"
