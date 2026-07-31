@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -60,12 +61,22 @@ var (
 			MarginLeft(2)
 )
 
+const (
+	headerLines = 2 // "Outdated packages:" + blank line
+	footerLines = 2 // blank line + keybinding hint
+)
+
 type model struct {
-	items    []Item
-	cursor   int
-	spinner  spinner.Model
-	quitting bool
-	action   Action
+	items     []Item
+	cursor    int
+	spinner   spinner.Model
+	viewport  viewport.Model
+	ready     bool
+	width     int
+	height    int
+	quitting  bool
+	action    Action
+	itemLines []int // line offset of each item's header within the rendered content
 }
 
 func newModel(items []Item) model {
@@ -75,11 +86,11 @@ func newModel(items []Item) model {
 	return model{items: items, spinner: s}
 }
 
-// Run launches the interactive list for the given packages and blocks until
-// the user quits or confirms an upgrade.
+// Run launches the interactive, fullscreen list for the given packages and
+// blocks until the user quits or confirms an upgrade.
 func Run(items []Item) (Result, error) {
 	m := newModel(items)
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
 		return Result{}, err
@@ -155,22 +166,70 @@ func renderMarkdown(raw string) string {
 	return strings.TrimRight(out, "\n")
 }
 
+func (m *model) refreshViewport() {
+	content, itemLines := m.renderList()
+	m.itemLines = itemLines
+	m.viewport.SetContent(content)
+}
+
+// scrollToCursor adjusts the viewport offset so the highlighted item's
+// header line is visible, scrolling as little as possible.
+func (m *model) scrollToCursor() {
+	if m.cursor < 0 || m.cursor >= len(m.itemLines) {
+		return
+	}
+	target := m.itemLines[m.cursor]
+	if target < m.viewport.YOffset {
+		m.viewport.SetYOffset(target)
+	} else if target > m.viewport.YOffset+m.viewport.Height-1 {
+		m.viewport.SetYOffset(target - m.viewport.Height + 1)
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		vpHeight := msg.Height - headerLines - footerLines
+		if vpHeight < 1 {
+			vpHeight = 1
+		}
+		if !m.ready {
+			m.viewport = viewport.New(msg.Width, vpHeight)
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width
+			m.viewport.Height = vpHeight
+		}
+		m.refreshViewport()
+		m.scrollToCursor()
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
 			m.quitting = true
 			return m, tea.Quit
 
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+		case "up":
+			m.moveCursor(-1)
+
+		case "down":
+			m.moveCursor(1)
+
+		case "k":
+			if len(m.items) > 0 && m.items[m.cursor].Expanded {
+				m.viewport.LineUp(1)
+			} else {
+				m.moveCursor(-1)
 			}
 
-		case "down", "j":
-			if m.cursor < len(m.items)-1 {
-				m.cursor++
+		case "j":
+			if len(m.items) > 0 && m.items[m.cursor].Expanded {
+				m.viewport.LineDown(1)
+			} else {
+				m.moveCursor(1)
 			}
 
 		case "enter":
@@ -181,8 +240,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it.Expanded = !it.Expanded
 			if it.Expanded && it.Body == "" && !it.Loading {
 				it.Loading = true
+				m.refreshViewport()
+				m.scrollToCursor()
 				return m, fetchBody(m.cursor, *it)
 			}
+			m.refreshViewport()
+			m.scrollToCursor()
 
 		case "a":
 			m.action = ActionUpgradeAll
@@ -200,27 +263,72 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.index >= 0 && msg.index < len(m.items) {
 			m.items[msg.index].Body = msg.body
 			m.items[msg.index].Loading = false
+			m.refreshViewport()
 		}
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		if len(m.items) > 0 && m.items[m.cursor].Loading {
+			m.refreshViewport()
+		}
 		return m, cmd
 	}
 
 	return m, nil
 }
 
+// moveCursor moves the highlighted item by delta and scrolls it into view.
+func (m *model) moveCursor(delta int) {
+	if len(m.items) == 0 {
+		return
+	}
+	m.cursor += delta
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor > len(m.items)-1 {
+		m.cursor = len(m.items) - 1
+	}
+	m.scrollToCursor()
+}
+
 func (m model) View() string {
 	if m.quitting {
 		return ""
+	}
+	if !m.ready {
+		return "Loading..."
 	}
 
 	var b strings.Builder
 	b.WriteString(styleHeader.Render("Outdated packages:"))
 	b.WriteString("\n\n")
+	b.WriteString(m.viewport.View())
+	b.WriteString("\n\n")
+	b.WriteString(styleDim.Render("[↑/↓, j/k] move  [enter] expand/collapse  [j/k] scroll changelog when expanded  [a] upgrade all  [u] upgrade current  [q] quit"))
+
+	return b.String()
+}
+
+// renderList builds the scrollable document: one line per package, with the
+// expanded ones' changelog bodies inlined beneath them. Returns the content
+// and the line offset of each item's header, used to scroll a given item
+// into view.
+func (m model) renderList() (string, []int) {
+	var b strings.Builder
+	itemLines := make([]int, len(m.items))
+	line := 0
+
+	writeLine := func(s string) {
+		b.WriteString(s)
+		b.WriteString("\n")
+		line += strings.Count(s, "\n") + 1
+	}
 
 	for i, it := range m.items {
+		itemLines[i] = line
+
 		cursor := "  "
 		if i == m.cursor {
 			cursor = styleArrow.Render("> ")
@@ -231,12 +339,10 @@ func (m model) View() string {
 			sourceHint = styleDim.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
 		}
 
-		line := fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
+		writeLine(fmt.Sprintf("%s%s (%s)  %s -> %s  %s",
 			cursor, it.Name, it.Kind,
 			styleVersion.Render(it.Installed), styleVersion.Render(it.Current),
-			sourceHint)
-		b.WriteString(line)
-		b.WriteString("\n")
+			sourceHint))
 
 		if it.Expanded {
 			var content string
@@ -248,13 +354,9 @@ func (m model) View() string {
 			default:
 				content = styleDim.Render("(empty)")
 			}
-			b.WriteString(styleBodyFrame.Render(content))
-			b.WriteString("\n")
+			writeLine(styleBodyFrame.Render(content))
 		}
 	}
 
-	b.WriteString("\n")
-	b.WriteString(styleDim.Render("[↑/↓] move  [enter] expand/collapse  [a] upgrade all  [u] upgrade current  [q] quit"))
-
-	return b.String()
+	return b.String(), itemLines
 }
