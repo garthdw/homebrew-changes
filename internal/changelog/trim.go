@@ -51,19 +51,69 @@ func TrimToRange(content, newVersion, installedVersion string) (string, bool) {
 }
 
 // findHeading returns the index of the first markdown heading line
-// containing version, or -1 if none is found.
+// containing version, or -1 if none is found. Both ATX (`# text`) and
+// Setext (`text` underlined with `===`/`---`) headings are recognized,
+// since some changelogs (e.g. fzf, ripgrep) use the latter exclusively.
 func findHeading(lines []string, version string) int {
 	if version == "" {
 		return -1
 	}
 	for i, line := range lines {
-		trimmed := strings.TrimLeft(line, "#")
-		if trimmed == line {
-			continue // no leading '#', not a heading
-		}
-		if strings.Contains(line, version) {
+		isATX := strings.TrimLeft(line, "#") != line
+		isSetext := strings.TrimSpace(line) != "" && i+1 < len(lines) && isSetextUnderline(lines[i+1])
+		if (isATX || isSetext) && containsVersion(line, version) {
 			return i
 		}
 	}
 	return -1
+}
+
+// isSetextUnderline reports whether line is a valid Setext heading
+// underline: one or more '=' characters, or one or more '-' characters,
+// with no other content besides surrounding whitespace.
+func isSetextUnderline(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	c := trimmed[0]
+	if c != '=' && c != '-' {
+		return false
+	}
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] != c {
+			return false
+		}
+	}
+	return true
+}
+
+// containsVersion reports whether line contains version as a standalone
+// token, not merely as a substring of a longer version number (e.g. "3.1"
+// inside "3.10.2"). A trailing "." is allowed after the match (e.g. "3.1"
+// inside "3.1.0"), since brew's reported version is sometimes less precise
+// than the version documented in a changelog heading.
+func containsVersion(line, version string) bool {
+	for start := 0; ; {
+		idx := strings.Index(line[start:], version)
+		if idx == -1 {
+			return false
+		}
+		idx += start
+		end := idx + len(version)
+		beforeOK := idx == 0 || !isVersionChar(line[idx-1])
+		afterOK := end == len(line) || !isDigit(line[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func isVersionChar(b byte) bool {
+	return isDigit(b) || b == '.'
+}
+
+func isDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }

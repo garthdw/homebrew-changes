@@ -323,7 +323,17 @@ const maxReleasePages = 3
 // (the tail of a different, longer version number) since '.' would be
 // mistaken for a valid prefix separator.
 func tagMatchesVersion(tag, version string) bool {
-	if version == "" || !strings.HasSuffix(tag, version) {
+	if version == "" {
+		return false
+	}
+	if exactSuffixMatch(tag, version) {
+		return true
+	}
+	return trailingComponentsMatch(tag, version)
+}
+
+func exactSuffixMatch(tag, version string) bool {
+	if !strings.HasSuffix(tag, version) {
 		return false
 	}
 	if len(tag) == len(version) {
@@ -331,6 +341,46 @@ func tagMatchesVersion(tag, version string) bool {
 	}
 	boundary := tag[len(tag)-len(version)-1]
 	return boundary != '.' && (boundary < '0' || boundary > '9')
+}
+
+var trailingVersionPattern = regexp.MustCompile(`[0-9]+(\.[0-9]+)*$`)
+
+// trailingComponentsMatch compares tag's trailing dot-separated numeric run
+// against version component-by-component, ignoring leading zeros in each
+// component. This catches cases like yt-dlp, whose calendar-style versions
+// are zero-padded in its GitHub tags ("2026.07.04") but not in Homebrew's
+// reported version ("2026.7.4"), which exactSuffixMatch can't see past.
+func trailingComponentsMatch(tag, version string) bool {
+	loc := trailingVersionPattern.FindStringIndex(tag)
+	if loc == nil {
+		return false
+	}
+	if loc[0] > 0 {
+		boundary := tag[loc[0]-1]
+		if boundary == '.' || (boundary >= '0' && boundary <= '9') {
+			return false
+		}
+	}
+
+	tagParts := strings.Split(tag[loc[0]:], ".")
+	versionParts := strings.Split(version, ".")
+	if len(tagParts) != len(versionParts) {
+		return false
+	}
+	for i := range tagParts {
+		if normalizeVersionComponent(tagParts[i]) != normalizeVersionComponent(versionParts[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeVersionComponent(s string) string {
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return "0"
+	}
+	return s
 }
 
 // FetchReleases returns releases newer than installedVersion, newest first,
