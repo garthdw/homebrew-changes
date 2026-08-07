@@ -13,9 +13,14 @@ const MaxContentLines = 100
 
 // TrimToRange returns the section of content between the newVersion and
 // installedVersion headings, if both can be located. If only newVersion's
-// heading is found, it returns up to MaxContentLines from there. If neither
-// heading can be found, it returns the first MaxContentLines of content.
-func TrimToRange(content, newVersion, installedVersion string) string {
+// heading is found, it returns up to MaxContentLines from there. found is
+// false only when newVersion's heading can't be located at all — e.g. an
+// index-style changelog (like Node.js's, which just links out to
+// per-major-version files) that doesn't actually document the version in
+// question. In that case, the first MaxContentLines of content is returned
+// as a last resort, but callers may prefer to treat found=false as a
+// signal to fall back to another source (release notes, say).
+func TrimToRange(content, newVersion, installedVersion string) (string, bool) {
 	lines := strings.Split(content, "\n")
 
 	startLine := findHeading(lines, newVersion)
@@ -25,12 +30,12 @@ func TrimToRange(content, newVersion, installedVersion string) string {
 			end = len(lines)
 		}
 		result := strings.Join(lines[:end], "\n")
-		return result + fmt.Sprintf("\n\n... (couldn't locate version headings, showing first %d lines)", MaxContentLines)
+		return result + fmt.Sprintf("\n\n... (couldn't locate version headings, showing first %d lines)", MaxContentLines), false
 	}
 
 	endLine := findHeading(lines, installedVersion)
 	if endLine != -1 && endLine > startLine {
-		return strings.Join(lines[startLine:endLine], "\n")
+		return strings.Join(lines[startLine:endLine], "\n"), true
 	}
 
 	end := startLine + MaxContentLines
@@ -42,7 +47,7 @@ func TrimToRange(content, newVersion, installedVersion string) string {
 	if truncated {
 		result += fmt.Sprintf("\n\n... (truncated, showing %d lines from the %s heading)", MaxContentLines, newVersion)
 	}
-	return result
+	return result, true
 }
 
 // findHeading returns the index of the first markdown heading line

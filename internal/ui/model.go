@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/garthdw/homebrew-changes/internal/changelog"
 	"github.com/garthdw/homebrew-changes/internal/ghsource"
 	"github.com/garthdw/homebrew-changes/internal/homebrew"
 )
@@ -29,11 +28,10 @@ type Item struct {
 	Owner     string // GitHub owner, empty if no repo could be resolved
 	Repo      string // GitHub repo name
 
-	Expanded       bool
-	Loading        bool
-	LoadingStage   string                   // changelog filename currently being checked, or "releases" once falling back to release notes
-	changelogProbe *ghsource.ChangelogProbe // sequences candidate changelog filenames while Loading; nil once resolved
-	Body           string                   // rendered changelog/releases content, empty until fetched
+	Expanded     bool
+	Loading      bool
+	LoadingStage string // "changelog" while resolving/fetching the changelog file, or "releases" once falling back to release notes
+	Body         string // rendered changelog/releases content, empty until fetched
 
 	// Upgrading, Upgraded, and UpgradeErr track an in-place single-package
 	// upgrade triggered by the "u" key; unlike ActionUpgradeAll, this
@@ -129,31 +127,47 @@ type bodyFetchedMsg struct {
 	body  string
 }
 
-// changelogFileMissingMsg signals that the item's current candidate
-// changelog filename wasn't found, so the caller should try the item's next
-// candidate (via its changelogProbe) or fall back to releases once the
-// probe is exhausted.
-type changelogFileMissingMsg struct {
-	index int
+// changelogResolvedMsg reports which changelog filename (if any) should be
+// used. An empty filename means either none of the well-known candidates
+// exist, or the repo's releases are more recently updated than its
+// changelog file (see ghsource.ResolveChangelogSource) — either way, the
+// caller should fall back to releases.
+type changelogResolvedMsg struct {
+	index    int
+	filename string
 }
 
-// fetchChangelogFileCmd checks the single candidate changelog filename that
-// it.changelogProbe currently points at. Trying one filename per command,
-// rather than looping internally, lets the UI show which filename is
-// currently being checked; the probe (shared with the model's stored Item
-// via pointer) advances itself as each candidate is tried.
-func fetchChangelogFileCmd(index int, it Item) tea.Cmd {
+// resolveChangelogCmd determines whether to use the repo's changelog file
+// or its releases (ghsource.ResolveChangelogSource), which costs at most a
+// couple of small requests rather than probing each candidate changelog
+// filename with its own round trip.
+func resolveChangelogCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
 		if it.Owner == "" {
 			return bodyFetchedMsg{index: index, body: "No GitHub repository could be resolved for this package; changelog unavailable."}
 		}
-		name := it.changelogProbe.Filename()
-		if content, ok := it.changelogProbe.Try(); ok {
-			raw := changelog.TrimToRange(content, it.Current, it.Installed)
-			body := fmt.Sprintf("(from %s)", name) + "\n\n" + renderMarkdown(raw)
-			return bodyFetchedMsg{index: index, body: body}
+		name, useReleases := ghsource.ResolveChangelogSource(it.Owner, it.Repo)
+		if useReleases {
+			return changelogResolvedMsg{index: index}
 		}
-		return changelogFileMissingMsg{index: index}
+		return changelogResolvedMsg{index: index, filename: name}
+	}
+}
+
+// fetchChangelogFileCmd fetches and trims the changelog filename
+// resolveChangelogCmd found (see ghsource.FetchChangelogSection). It falls
+// back to releases if that source turns out to be unusable — either the
+// fetch fails despite the listing saying the file exists (e.g. a race with
+// the repo changing), or the file doesn't actually document the target
+// version.
+func fetchChangelogFileCmd(index int, it Item, filename string) tea.Cmd {
+	return func() tea.Msg {
+		section, ok := ghsource.FetchChangelogSection(it.Owner, it.Repo, filename, it.Current, it.Installed)
+		if !ok {
+			return changelogResolvedMsg{index: index}
+		}
+		body := fmt.Sprintf("(from %s)", filename) + "\n\n" + renderMarkdown(section)
+		return bodyFetchedMsg{index: index, body: body}
 	}
 }
 
@@ -295,11 +309,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it.Expanded = !it.Expanded
 			if it.Expanded && it.Body == "" && !it.Loading {
 				it.Loading = true
-				it.changelogProbe = ghsource.NewChangelogProbe(it.Owner, it.Repo)
-				it.LoadingStage = it.changelogProbe.Filename()
+				it.LoadingStage = "changelog"
 				m.refreshViewport()
 				m.scrollToCursor()
-				return m, fetchChangelogFileCmd(m.cursor, *it)
+				return m, resolveChangelogCmd(m.cursor, *it)
 			}
 			m.refreshViewport()
 			m.scrollToCursor()
@@ -347,13 +360,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, upgradePackage(m.cursor, *it)
 		}
 
-	case changelogFileMissingMsg:
+	case changelogResolvedMsg:
 		if msg.index >= 0 && msg.index < len(m.items) {
 			it := m.items[msg.index]
-			if name := it.changelogProbe.Filename(); name != "" {
-				m.items[msg.index].LoadingStage = name
+			if msg.filename != "" {
+				m.items[msg.index].LoadingStage = msg.filename
 				m.refreshViewport()
-				return m, fetchChangelogFileCmd(msg.index, it)
+				return m, fetchChangelogFileCmd(msg.index, it, msg.filename)
 			}
 			m.items[msg.index].LoadingStage = "releases"
 			m.refreshViewport()
@@ -365,7 +378,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.items[msg.index].Body = msg.body
 			m.items[msg.index].Loading = false
 			m.items[msg.index].LoadingStage = ""
-			m.items[msg.index].changelogProbe = nil
 			m.refreshViewport()
 		}
 

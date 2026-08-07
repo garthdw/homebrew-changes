@@ -17,13 +17,16 @@ func TestTrimToRange_BetweenHeadings(t *testing.T) {
 		"line c",
 	}, "\n")
 
-	got := TrimToRange(content, "2.0.0", "1.0.0")
+	got, found := TrimToRange(content, "2.0.0", "1.0.0")
 	want := strings.Join([]string{
 		"## 2.0.0",
 		"line a",
 		"line b",
 	}, "\n")
 
+	if !found {
+		t.Error("expected found = true")
+	}
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -37,8 +40,11 @@ func TestTrimToRange_InstalledHeadingMissing(t *testing.T) {
 	}
 	content := strings.Join(lines, "\n")
 
-	got := TrimToRange(content, "2.0.0", "1.0.0")
+	got, found := TrimToRange(content, "2.0.0", "1.0.0")
 
+	if !found {
+		t.Error("expected found = true")
+	}
 	if !strings.HasPrefix(got, "## 2.0.0\nline 0") {
 		t.Errorf("expected result to start from the new-version heading, got prefix %q", got[:30])
 	}
@@ -59,8 +65,11 @@ func TestTrimToRange_NewVersionHeadingMissing(t *testing.T) {
 	}
 	content := strings.Join(lines, "\n")
 
-	got := TrimToRange(content, "9.9.9", "1.0.0")
+	got, found := TrimToRange(content, "9.9.9", "1.0.0")
 
+	if found {
+		t.Error("expected found = false when the new-version heading can't be located")
+	}
 	if !strings.Contains(got, "couldn't locate version headings, showing first 100 lines") {
 		t.Errorf("expected fallback notice, got %q", got)
 	}
@@ -79,9 +88,12 @@ func TestTrimToRange_InstalledHeadingBeforeNewVersion(t *testing.T) {
 		"new stuff",
 	}, "\n")
 
-	got := TrimToRange(content, "2.0.0", "1.0.0")
+	got, found := TrimToRange(content, "2.0.0", "1.0.0")
 	want := "## 2.0.0\nnew stuff"
 
+	if !found {
+		t.Error("expected found = true")
+	}
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -93,9 +105,12 @@ func TestTrimToRange_EmptyInstalledVersion(t *testing.T) {
 		"line a",
 	}, "\n")
 
-	got := TrimToRange(content, "2.0.0", "")
+	got, found := TrimToRange(content, "2.0.0", "")
 	want := "## 2.0.0\nline a"
 
+	if !found {
+		t.Error("expected found = true")
+	}
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}

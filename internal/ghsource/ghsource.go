@@ -13,6 +13,9 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/garthdw/homebrew-changes/internal/changelog"
 )
 
 var changelogFilenames = []string{"CHANGELOG.md", "CHANGES.md", "HISTORY.md", "NEWS.md", "CHANGELOG"}
@@ -79,26 +82,33 @@ func get(url string) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
 }
 
+// getJSON fetches url and unmarshals the JSON response body into out.
+func getJSON(url string, out any) error {
+	resp, err := get(url)
+	if err != nil {
+		return err
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+	}
+	return json.Unmarshal(body, out)
+}
+
 type contentsResponse struct {
 	Content string `json:"content"`
 }
 
-// FetchChangelogFileAt tries fetching a single candidate changelog filename
-// from the repo's default branch.
+// FetchChangelogFileAt fetches a single named file's content from the
+// repo's default branch.
 func FetchChangelogFileAt(owner, repo, filename string) (content string, ok bool) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", apiBaseURL, owner, repo, filename)
-	resp, err := get(url)
-	if err != nil {
-		return "", false
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return "", false
-	}
-
 	var parsed contentsResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if err := getJSON(url, &parsed); err != nil {
 		return "", false
 	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(parsed.Content, "\n", ""))
@@ -108,51 +118,188 @@ func FetchChangelogFileAt(owner, repo, filename string) (content string, ok bool
 	return string(decoded), true
 }
 
-// FetchChangelogFile tries each well-known changelog filename in turn on
-// the repo's default branch, returning the first one found.
-func FetchChangelogFile(owner, repo string) (filename, content string, ok bool) {
-	p := NewChangelogProbe(owner, repo)
-	for name := p.Filename(); name != ""; name = p.Filename() {
-		if content, ok := p.Try(); ok {
-			return name, content, true
-		}
-	}
-	return "", "", false
-}
-
-// ChangelogProbe steps through the well-known changelog filenames for a
-// repo one at a time, so a caller (e.g. the TUI) can report which filename
-// is currently being checked without knowing the candidate list itself.
-type ChangelogProbe struct {
-	owner, repo string
-	idx         int
-}
-
-// NewChangelogProbe creates a probe positioned at the first candidate
-// changelog filename for owner/repo.
-func NewChangelogProbe(owner, repo string) *ChangelogProbe {
-	return &ChangelogProbe{owner: owner, repo: repo}
-}
-
-// Filename returns the candidate filename the next call to Try will check,
-// or "" once every candidate has been tried.
-func (p *ChangelogProbe) Filename() string {
-	if p.idx >= len(changelogFilenames) {
-		return ""
-	}
-	return changelogFilenames[p.idx]
-}
-
-// Try fetches the current candidate filename and advances the probe to the
-// next one. ok reports whether the file was found.
-func (p *ChangelogProbe) Try() (content string, ok bool) {
-	name := p.Filename()
-	if name == "" {
+// FetchChangelogSection fetches filename's content and trims it to the
+// section documenting newVersion. ok is false if either the fetch fails, or
+// the file doesn't actually cover newVersion (e.g. an index-style changelog
+// like Node.js's root CHANGELOG.md, which just links out to per-major-
+// version files rather than documenting versions itself) — either way, the
+// caller should treat this source as unusable and fall back to another one.
+func FetchChangelogSection(owner, repo, filename, newVersion, installedVersion string) (section string, ok bool) {
+	content, ok := FetchChangelogFileAt(owner, repo, filename)
+	if !ok {
 		return "", false
 	}
-	content, ok = FetchChangelogFileAt(p.owner, p.repo, name)
-	p.idx++
-	return content, ok
+	return changelog.TrimToRange(content, newVersion, installedVersion)
+}
+
+type repoContentEntry struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// ResolveChangelogFilename lists the repo's root directory in a single
+// request and returns the well-known changelog filename present there. This
+// avoids probing each candidate filename with its own round trip (which can
+// add seconds of latency on repos where the first few candidates all miss).
+// If more than one candidate exists, the most recently committed one wins
+// (see lastCommitDate), on the theory that it's the one still maintained.
+// found is false if none of the candidates exist; err is set only if the
+// listing request itself failed.
+func ResolveChangelogFilename(owner, repo string) (filename string, found bool, err error) {
+	name, _, found, err := resolveChangelogFilename(owner, repo)
+	return name, found, err
+}
+
+// resolveChangelogFilename is ResolveChangelogFilename's implementation. It
+// additionally returns the winning candidate's last-commit date when
+// already known — i.e. when mostRecentlyCommitted had to fetch it to break
+// a tie between multiple candidates — so ResolveChangelogSource can reuse
+// that date instead of re-fetching it. date is the zero value when there
+// was only one candidate (no tie-break needed, so no date was fetched).
+func resolveChangelogFilename(owner, repo string) (filename string, date time.Time, found bool, err error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/contents/", apiBaseURL, owner, repo)
+	var entries []repoContentEntry
+	if err := getJSON(url, &entries); err != nil {
+		return "", time.Time{}, false, fmt.Errorf("listing contents for %s/%s: %w", owner, repo, err)
+	}
+	present := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.Type == "file" {
+			present[e.Name] = true
+		}
+	}
+
+	var matches []string
+	for _, name := range changelogFilenames {
+		if present[name] {
+			matches = append(matches, name)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", time.Time{}, false, nil
+	case 1:
+		return matches[0], time.Time{}, true, nil
+	default:
+		name, d := mostRecentlyCommitted(owner, repo, matches)
+		return name, d, true, nil
+	}
+}
+
+// mostRecentlyCommitted returns whichever of the given filenames (assumed
+// to all exist in the repo) has the most recent commit touching it, and
+// that commit's date, fetched concurrently since each lookup is an
+// independent request.
+func mostRecentlyCommitted(owner, repo string, filenames []string) (string, time.Time) {
+	dates := make([]time.Time, len(filenames))
+	var wg sync.WaitGroup
+	for i, name := range filenames {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			dates[i] = lastCommitDate(owner, repo, name)
+		}(i, name)
+	}
+	wg.Wait()
+
+	best := 0
+	for i := 1; i < len(filenames); i++ {
+		if dates[i].After(dates[best]) {
+			best = i
+		}
+	}
+	return filenames[best], dates[best]
+}
+
+type commitEntry struct {
+	Commit struct {
+		Committer struct {
+			Date string `json:"date"`
+		} `json:"committer"`
+	} `json:"commit"`
+}
+
+// lastCommitDate returns the timestamp of the most recent commit touching
+// filename, or the zero time if it can't be determined.
+func lastCommitDate(owner, repo, filename string) time.Time {
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?path=%s&per_page=1", apiBaseURL, owner, repo, filename)
+	var commits []commitEntry
+	if err := getJSON(url, &commits); err != nil || len(commits) == 0 {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, commits[0].Commit.Committer.Date)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// FetchChangelogFile resolves and fetches the repo's changelog file,
+// returning the filename found and its content.
+func FetchChangelogFile(owner, repo string) (filename, content string, ok bool) {
+	name, found, err := ResolveChangelogFilename(owner, repo)
+	if err != nil || !found {
+		return "", "", false
+	}
+	content, ok = FetchChangelogFileAt(owner, repo, name)
+	if !ok {
+		return "", "", false
+	}
+	return name, content, true
+}
+
+// ResolveChangelogSource decides between a repo's changelog file and its
+// GitHub releases: some repos stop maintaining a CHANGELOG.md (or similar)
+// after switching to GitHub Releases, leaving the stale file in place. If a
+// changelog file exists, its last commit date is compared against the
+// latest release's publish date; releases win if they're newer. useReleases
+// is also true if no changelog file was found, or its listing couldn't be
+// fetched.
+func ResolveChangelogSource(owner, repo string) (filename string, useReleases bool) {
+	name, fileDate, found, err := resolveChangelogFilename(owner, repo)
+	if err != nil || !found {
+		return "", true
+	}
+
+	var releaseDate time.Time
+	if !fileDate.IsZero() {
+		// Multiple candidates existed, so resolveChangelogFilename already
+		// fetched the winning file's commit date while breaking the tie;
+		// only the release date is still needed.
+		releaseDate = latestReleaseDate(owner, repo)
+	} else {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			fileDate = lastCommitDate(owner, repo, name)
+		}()
+		go func() {
+			defer wg.Done()
+			releaseDate = latestReleaseDate(owner, repo)
+		}()
+		wg.Wait()
+	}
+
+	if !releaseDate.IsZero() && releaseDate.After(fileDate) {
+		return "", true
+	}
+	return name, false
+}
+
+// latestReleaseDate returns the publish date of the repo's most recent
+// release, or the zero time if it can't be determined.
+func latestReleaseDate(owner, repo string) time.Time {
+	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=1", apiBaseURL, owner, repo)
+	var releases []Release
+	if err := getJSON(url, &releases); err != nil || len(releases) == 0 {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, releases[0].PublishedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // Release is a single GitHub release.
@@ -164,11 +311,33 @@ type Release struct {
 
 const maxReleasePages = 3
 
+// tagMatchesVersion reports whether a release tag identifies the given
+// plain version string (e.g. Homebrew's "1.8.1"), regardless of whatever
+// prefix the upstream project puts on its tags: "v1.8.1", "jq-1.8.1", and
+// even "2024-edition-v1.8.1" all match "1.8.1".
+//
+// A tag matches if it ends with the version and the character immediately
+// before that suffix is neither a digit nor '.'. That boundary check is
+// what makes this safe where a naive "strip everything before the first
+// digit" isn't: without it, version "2.3" would wrongly match tag "1.2.3"
+// (the tail of a different, longer version number) since '.' would be
+// mistaken for a valid prefix separator.
+func tagMatchesVersion(tag, version string) bool {
+	if version == "" || !strings.HasSuffix(tag, version) {
+		return false
+	}
+	if len(tag) == len(version) {
+		return true
+	}
+	boundary := tag[len(tag)-len(version)-1]
+	return boundary != '.' && (boundary < '0' || boundary > '9')
+}
+
 // FetchReleases returns releases newer than installedVersion, newest first,
-// capped at a reasonable count. Tag names are compared with a leading "v"
-// stripped so "v1.2.3" and "1.2.3" match.
+// capped at a reasonable count. It stops as soon as it reaches the release
+// matching installedVersion (see tagMatchesVersion), since everything after
+// that in the newest-first list is already installed.
 func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
-	normalizedInstalled := strings.TrimPrefix(installedVersion, "v")
 	var filtered []Release
 	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", apiBaseURL, owner, repo)
 
@@ -191,12 +360,12 @@ func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
 			return nil, fmt.Errorf("parsing releases for %s/%s: %w", owner, repo, err)
 		}
 		for _, r := range pageReleases {
-			if strings.TrimPrefix(r.TagName, "v") == normalizedInstalled {
-				continue
+			if tagMatchesVersion(r.TagName, installedVersion) {
+				return filtered, nil
 			}
 			filtered = append(filtered, r)
 			if len(filtered) >= 20 {
-				break
+				return filtered, nil
 			}
 		}
 

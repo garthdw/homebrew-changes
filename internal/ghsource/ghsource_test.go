@@ -86,16 +86,30 @@ func TestResolveRepo(t *testing.T) {
 	}
 }
 
+func rootListingHandler(names ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		entries := make([]repoContentEntry, len(names))
+		for i, n := range names {
+			entries[i] = repoContentEntry{Name: n, Type: "file"}
+		}
+		body, _ := json.Marshal(entries)
+		w.Write(body)
+	}
+}
+
 func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/o/r/contents/CHANGELOG.md" {
+		switch r.URL.Path {
+		case "/repos/o/r/contents/":
+			rootListingHandler("README.md", "CHANGELOG.md")(w, r)
+		case "/repos/o/r/contents/CHANGELOG.md":
+			body, _ := json.Marshal(map[string]string{
+				"content": base64.StdEncoding.EncodeToString([]byte("## 1.0.0\nnotes")),
+			})
+			w.Write(body)
+		default:
 			w.WriteHeader(http.StatusNotFound)
-			return
 		}
-		body, _ := json.Marshal(map[string]string{
-			"content": base64.StdEncoding.EncodeToString([]byte("## 1.0.0\nnotes")),
-		})
-		w.Write(body)
 	})
 
 	filename, content, ok := FetchChangelogFile("o", "r")
@@ -112,14 +126,17 @@ func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
 
 func TestFetchChangelogFile_FallsThroughToLaterName(t *testing.T) {
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/o/r/contents/HISTORY.md" {
+		switch r.URL.Path {
+		case "/repos/o/r/contents/":
+			rootListingHandler("README.md", "HISTORY.md")(w, r)
+		case "/repos/o/r/contents/HISTORY.md":
+			body, _ := json.Marshal(map[string]string{
+				"content": base64.StdEncoding.EncodeToString([]byte("history notes")),
+			})
+			w.Write(body)
+		default:
 			w.WriteHeader(http.StatusNotFound)
-			return
 		}
-		body, _ := json.Marshal(map[string]string{
-			"content": base64.StdEncoding.EncodeToString([]byte("history notes")),
-		})
-		w.Write(body)
 	})
 
 	filename, content, ok := FetchChangelogFile("o", "r")
@@ -129,9 +146,7 @@ func TestFetchChangelogFile_FallsThroughToLaterName(t *testing.T) {
 }
 
 func TestFetchChangelogFile_NoneFound(t *testing.T) {
-	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
+	withTestServer(t, rootListingHandler("README.md", "LICENSE"))
 
 	_, _, ok := FetchChangelogFile("o", "r")
 	if ok {
@@ -139,20 +154,104 @@ func TestFetchChangelogFile_NoneFound(t *testing.T) {
 	}
 }
 
-func TestFetchReleases_FiltersInstalledAndPaginates(t *testing.T) {
+func TestResolveChangelogFilename_MultipleMatchesPicksMostRecentlyCommitted(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/o/r/contents/":
+			rootListingHandler("CHANGELOG.md", "NEWS.md")(w, r)
+		case r.URL.Path == "/repos/o/r/commits" && r.URL.Query().Get("path") == "CHANGELOG.md":
+			body, _ := json.Marshal([]map[string]any{
+				{"commit": map[string]any{"committer": map[string]string{"date": "2020-01-01T00:00:00Z"}}},
+			})
+			w.Write(body)
+		case r.URL.Path == "/repos/o/r/commits" && r.URL.Query().Get("path") == "NEWS.md":
+			body, _ := json.Marshal([]map[string]any{
+				{"commit": map[string]any{"committer": map[string]string{"date": "2026-01-01T00:00:00Z"}}},
+			})
+			w.Write(body)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	filename, found, err := ResolveChangelogFilename("o", "r")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !found || filename != "NEWS.md" {
+		t.Errorf("got (%q, %v), want (\"NEWS.md\", true)", filename, found)
+	}
+}
+
+func TestResolveChangelogFilename_ListingError(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	_, found, err := ResolveChangelogFilename("o", "r")
+	if err == nil {
+		t.Error("expected error on non-200 listing response")
+	}
+	if found {
+		t.Error("expected found = false on listing error")
+	}
+}
+
+func changelogSourceServer(t *testing.T, changelogCommitDate, latestReleaseDate string) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/o/r/contents/":
+			rootListingHandler("CHANGELOG.md")(w, r)
+		case r.URL.Path == "/repos/o/r/commits" && r.URL.Query().Get("path") == "CHANGELOG.md":
+			body, _ := json.Marshal([]map[string]any{
+				{"commit": map[string]any{"committer": map[string]string{"date": changelogCommitDate}}},
+			})
+			w.Write(body)
+		case r.URL.Path == "/repos/o/r/releases":
+			body, _ := json.Marshal([]map[string]string{{"published_at": latestReleaseDate, "tag_name": "v1"}})
+			w.Write(body)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
+func TestResolveChangelogSource_PrefersReleasesWhenNewerThanChangelogFile(t *testing.T) {
+	changelogSourceServer(t, "2020-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+
+	filename, useReleases := ResolveChangelogSource("o", "r")
+	if !useReleases || filename != "" {
+		t.Errorf("got (%q, %v), want (\"\", true)", filename, useReleases)
+	}
+}
+
+func TestResolveChangelogSource_PrefersChangelogFileWhenNewerThanReleases(t *testing.T) {
+	changelogSourceServer(t, "2026-01-01T00:00:00Z", "2020-01-01T00:00:00Z")
+
+	filename, useReleases := ResolveChangelogSource("o", "r")
+	if useReleases || filename != "CHANGELOG.md" {
+		t.Errorf("got (%q, %v), want (\"CHANGELOG.md\", false)", filename, useReleases)
+	}
+}
+
+func TestFetchReleases_StopsAtInstalledAcrossPages(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("page") {
 		case "", "1":
 			w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/releases?per_page=100&page=2>; rel="next"`, srv.URL))
 			body, _ := json.Marshal([]Release{
+				{TagName: "v3.0.0", PublishedAt: "2024-03-01", Body: "third"},
 				{TagName: "v2.0.0", PublishedAt: "2024-02-01", Body: "second"},
-				{TagName: "v1.0.0", PublishedAt: "2024-01-01", Body: "first (installed)"},
 			})
 			w.Write(body)
 		case "2":
-			// No Link header: this is the last page.
-			body, _ := json.Marshal([]Release{{TagName: "v0.5.0", Body: "older"}})
+			// v0.5.0 is older than the installed v1.0.0 and must not appear:
+			// fetching should stop as soon as it reaches the installed tag.
+			body, _ := json.Marshal([]Release{
+				{TagName: "v1.0.0", PublishedAt: "2024-01-01", Body: "first (installed)"},
+				{TagName: "v0.5.0", Body: "older"},
+			})
 			w.Write(body)
 		}
 	}))
@@ -165,13 +264,53 @@ func TestFetchReleases_FiltersInstalledAndPaginates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := []string{"v2.0.0", "v0.5.0"}
+	want := []string{"v3.0.0", "v2.0.0"}
 	if len(releases) != len(want) {
 		t.Fatalf("got %+v, want tags %v", releases, want)
 	}
 	for i, tag := range want {
 		if releases[i].TagName != tag {
 			t.Errorf("release %d: got %q, want %q", i, releases[i].TagName, tag)
+		}
+	}
+}
+
+func TestFetchReleases_TagPrefixOtherThanV(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal([]Release{
+			{TagName: "jq-1.8.2", PublishedAt: "2026-06-20"},
+			{TagName: "jq-1.8.1", PublishedAt: "2025-07-01"},
+			{TagName: "jq-1.8.0", PublishedAt: "2025-06-01"},
+		})
+		w.Write(body)
+	})
+
+	releases, err := FetchReleases("o", "r", "1.8.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 1 || releases[0].TagName != "jq-1.8.2" {
+		t.Errorf("got %+v, want only jq-1.8.2", releases)
+	}
+}
+
+func TestTagMatchesVersion(t *testing.T) {
+	tests := []struct {
+		tag, version string
+		want         bool
+	}{
+		{"1.8.1", "1.8.1", true},
+		{"v1.8.1", "1.8.1", true},
+		{"jq-1.8.1", "1.8.1", true},
+		{"2024-edition-v1.8.1", "1.8.1", true},
+		{"1.2.3", "2.3", false}, // "2.3" is the tail of a longer version, not a real match
+		{"12.3", "2.3", false},  // digit immediately before the suffix
+		{"v1.8.2", "1.8.1", false},
+		{"", "1.8.1", false},
+	}
+	for _, tt := range tests {
+		if got := tagMatchesVersion(tt.tag, tt.version); got != tt.want {
+			t.Errorf("tagMatchesVersion(%q, %q) = %v, want %v", tt.tag, tt.version, got, tt.want)
 		}
 	}
 }
