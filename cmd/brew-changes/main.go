@@ -30,25 +30,41 @@ func run() error {
 		return nil
 	}
 
+	var outdatedFormulae, outdatedCasks []string
+	for _, pkg := range packages {
+		if pkg.IsCask {
+			outdatedCasks = append(outdatedCasks, pkg.Name)
+		} else {
+			outdatedFormulae = append(outdatedFormulae, pkg.Name)
+		}
+	}
+	formulaInfos, err := homebrew.ResolveInfoBatch(outdatedFormulae, false)
+	if err != nil {
+		formulaInfos = map[string]homebrew.Info{}
+	}
+	caskInfos, err := homebrew.ResolveInfoBatch(outdatedCasks, true)
+	if err != nil {
+		caskInfos = map[string]homebrew.Info{}
+	}
+
 	items := make([]ui.Item, 0, len(packages))
 	for _, pkg := range packages {
 		kind := "formula"
+		infos := formulaInfos
 		if pkg.IsCask {
 			kind = "cask"
+			infos = caskInfos
 		}
 
-		homepage, url, err := homebrew.ResolveInfo(pkg.Name, pkg.IsCask)
-		var owner, repo string
-		if err == nil {
-			owner, repo, _ = ghsource.ResolveRepo(homepage, url)
-		}
+		info := infos[pkg.Name]
+		owner, repo, _ := ghsource.ResolveRepo(info.Homepage, info.URL)
 
 		items = append(items, ui.Item{
 			Name:      pkg.Name,
 			Kind:      kind,
 			Installed: pkg.Installed,
 			Current:   pkg.Current,
-			Homepage:  homepage,
+			Homepage:  info.Homepage,
 			Owner:     owner,
 			Repo:      repo,
 		})

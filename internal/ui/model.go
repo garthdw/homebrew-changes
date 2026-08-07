@@ -342,6 +342,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, openURL(url)
 
 		case "a":
+			for i := range m.items {
+				if m.items[i].Upgrading {
+					return m, nil
+				}
+			}
 			m.action = ActionUpgradeAll
 			return m, tea.Quit
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // Package is an outdated formula or cask.
@@ -39,24 +40,42 @@ type outdatedResult struct {
 func Outdated() ([]Package, error) {
 	var result outdatedResult
 
-	out, err := exec.Command("brew", "outdated", "--json=v2", "--formula").Output()
-	if err != nil {
-		return nil, fmt.Errorf("brew outdated --formula: %w", err)
+	var formulaResult, caskResult outdatedResult
+	var formulaErr, caskErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		out, err := exec.Command("brew", "outdated", "--json=v2", "--formula").Output()
+		if err != nil {
+			formulaErr = fmt.Errorf("brew outdated --formula: %w", err)
+			return
+		}
+		if err := json.Unmarshal(out, &formulaResult); err != nil {
+			formulaErr = fmt.Errorf("parsing brew outdated --formula output: %w", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		out, err := exec.Command("brew", "outdated", "--json=v2", "--cask").Output()
+		if err != nil {
+			caskErr = fmt.Errorf("brew outdated --cask: %w", err)
+			return
+		}
+		if err := json.Unmarshal(out, &caskResult); err != nil {
+			caskErr = fmt.Errorf("parsing brew outdated --cask output: %w", err)
+		}
+	}()
+	wg.Wait()
+
+	if formulaErr != nil {
+		return nil, formulaErr
 	}
-	var formulaResult outdatedResult
-	if err := json.Unmarshal(out, &formulaResult); err != nil {
-		return nil, fmt.Errorf("parsing brew outdated --formula output: %w", err)
+	if caskErr != nil {
+		return nil, caskErr
 	}
 	result.Formulae = formulaResult.Formulae
-
-	out, err = exec.Command("brew", "outdated", "--json=v2", "--cask").Output()
-	if err != nil {
-		return nil, fmt.Errorf("brew outdated --cask: %w", err)
-	}
-	var caskResult outdatedResult
-	if err := json.Unmarshal(out, &caskResult); err != nil {
-		return nil, fmt.Errorf("parsing brew outdated --cask output: %w", err)
-	}
 	result.Casks = caskResult.Casks
 
 	packages := make([]Package, 0, len(result.Formulae)+len(result.Casks))
@@ -88,6 +107,7 @@ func firstOrEmpty(versions []string) string {
 }
 
 type formulaInfo struct {
+	Name     string `json:"name"`
 	Homepage string `json:"homepage"`
 	URLs     struct {
 		Stable struct {
@@ -100,6 +120,7 @@ type formulaInfo struct {
 }
 
 type caskInfo struct {
+	Token    string `json:"token"`
 	Homepage string `json:"homepage"`
 	URL      string `json:"url"`
 }
@@ -112,41 +133,54 @@ type caskInfoResult struct {
 	Casks []caskInfo `json:"casks"`
 }
 
-// ResolveInfo returns a package's homepage and source/download URL, either
-// of which may point at its GitHub repository.
-func ResolveInfo(name string, isCask bool) (homepage, url string, err error) {
+// Info is a package's homepage and source/download URL.
+type Info struct {
+	Homepage string
+	URL      string
+}
+
+// ResolveInfoBatch returns homepage/source info for multiple formulae or
+// casks (but not both) in a single `brew info` invocation, keyed by name.
+// Names not found in brew's output are simply absent from the result.
+func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
+	infos := make(map[string]Info, len(names))
+	if len(names) == 0 {
+		return infos, nil
+	}
+
 	if isCask {
-		out, err := exec.Command("brew", "info", "--json=v2", "--cask", name).Output()
+		args := append([]string{"info", "--json=v2", "--cask"}, names...)
+		out, err := exec.Command("brew", args...).Output()
 		if err != nil {
-			return "", "", fmt.Errorf("brew info --cask %s: %w", name, err)
+			return nil, fmt.Errorf("brew info --cask %v: %w", names, err)
 		}
 		var result caskInfoResult
 		if err := json.Unmarshal(out, &result); err != nil {
-			return "", "", fmt.Errorf("parsing brew info --cask %s output: %w", name, err)
+			return nil, fmt.Errorf("parsing brew info --cask %v output: %w", names, err)
 		}
-		if len(result.Casks) == 0 {
-			return "", "", fmt.Errorf("no cask info returned for %s", name)
+		for _, c := range result.Casks {
+			infos[c.Token] = Info{Homepage: c.Homepage, URL: c.URL}
 		}
-		return result.Casks[0].Homepage, result.Casks[0].URL, nil
+		return infos, nil
 	}
 
-	out, err := exec.Command("brew", "info", "--json=v2", "--formula", name).Output()
+	args := append([]string{"info", "--json=v2", "--formula"}, names...)
+	out, err := exec.Command("brew", args...).Output()
 	if err != nil {
-		return "", "", fmt.Errorf("brew info --formula %s: %w", name, err)
+		return nil, fmt.Errorf("brew info --formula %v: %w", names, err)
 	}
 	var result formulaInfoResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return "", "", fmt.Errorf("parsing brew info --formula %s output: %w", name, err)
+		return nil, fmt.Errorf("parsing brew info --formula %v output: %w", names, err)
 	}
-	if len(result.Formulae) == 0 {
-		return "", "", fmt.Errorf("no formula info returned for %s", name)
+	for _, f := range result.Formulae {
+		url := f.URLs.Stable.URL
+		if url == "" {
+			url = f.URLs.Head.URL
+		}
+		infos[f.Name] = Info{Homepage: f.Homepage, URL: url}
 	}
-	f := result.Formulae[0]
-	url = f.URLs.Stable.URL
-	if url == "" {
-		url = f.URLs.Head.URL
-	}
-	return f.Homepage, url, nil
+	return infos, nil
 }
 
 // Upgrade runs `brew upgrade` for the named formulae and/or `brew upgrade
