@@ -29,9 +29,11 @@ type Item struct {
 	Owner     string // GitHub owner, empty if no repo could be resolved
 	Repo      string // GitHub repo name
 
-	Expanded bool
-	Loading  bool
-	Body     string // rendered changelog/releases content, empty until fetched
+	Expanded       bool
+	Loading        bool
+	LoadingStage   string                   // changelog filename currently being checked, or "releases" once falling back to release notes
+	changelogProbe *ghsource.ChangelogProbe // sequences candidate changelog filenames while Loading; nil once resolved
+	Body           string                   // rendered changelog/releases content, empty until fetched
 
 	// Upgrading, Upgraded, and UpgradeErr track an in-place single-package
 	// upgrade triggered by the "u" key; unlike ActionUpgradeAll, this
@@ -127,30 +129,48 @@ type bodyFetchedMsg struct {
 	body  string
 }
 
-func fetchBody(index int, it Item) tea.Cmd {
+// changelogFileMissingMsg signals that the item's current candidate
+// changelog filename wasn't found, so the caller should try the item's next
+// candidate (via its changelogProbe) or fall back to releases once the
+// probe is exhausted.
+type changelogFileMissingMsg struct {
+	index int
+}
+
+// fetchChangelogFileCmd checks the single candidate changelog filename that
+// it.changelogProbe currently points at. Trying one filename per command,
+// rather than looping internally, lets the UI show which filename is
+// currently being checked; the probe (shared with the model's stored Item
+// via pointer) advances itself as each candidate is tried.
+func fetchChangelogFileCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
 		if it.Owner == "" {
 			return bodyFetchedMsg{index: index, body: "No GitHub repository could be resolved for this package; changelog unavailable."}
 		}
+		name := it.changelogProbe.Filename()
+		if content, ok := it.changelogProbe.Try(); ok {
+			raw := changelog.TrimToRange(content, it.Current, it.Installed)
+			body := fmt.Sprintf("(from %s)", name) + "\n\n" + renderMarkdown(raw)
+			return bodyFetchedMsg{index: index, body: body}
+		}
+		return changelogFileMissingMsg{index: index}
+	}
+}
 
-		var raw string
-		var sourceLabel string
-		if filename, content, ok := ghsource.FetchChangelogFile(it.Owner, it.Repo); ok {
-			sourceLabel = fmt.Sprintf("(from %s)", filename)
-			raw = changelog.TrimToRange(content, it.Current, it.Installed)
-		} else if releases, err := ghsource.FetchReleases(it.Owner, it.Repo, it.Installed); err == nil && len(releases) > 0 {
-			sourceLabel = "(from GitHub releases)"
-			var b strings.Builder
-			for _, r := range releases {
-				fmt.Fprintf(&b, "### %s (%s)\n\n%s\n\n", r.TagName, cmp.Or(r.PublishedAt, "unknown date"), cmp.Or(r.Body, "_no release notes_"))
-			}
-			raw = b.String()
-		} else {
+// fetchReleasesCmd checks GitHub releases, the second fetch stage, used only
+// when no changelog file was found.
+func fetchReleasesCmd(index int, it Item) tea.Cmd {
+	return func() tea.Msg {
+		releases, err := ghsource.FetchReleases(it.Owner, it.Repo, it.Installed)
+		if err != nil || len(releases) == 0 {
 			return bodyFetchedMsg{index: index, body: "No changelog file or GitHub releases found for this package."}
 		}
-
-		rendered := renderMarkdown(raw)
-		return bodyFetchedMsg{index: index, body: sourceLabel + "\n\n" + rendered}
+		var b strings.Builder
+		for _, r := range releases {
+			fmt.Fprintf(&b, "### %s (%s)\n\n%s\n\n", r.TagName, cmp.Or(r.PublishedAt, "unknown date"), cmp.Or(r.Body, "_no release notes_"))
+		}
+		body := "(from GitHub releases)\n\n" + renderMarkdown(b.String())
+		return bodyFetchedMsg{index: index, body: body}
 	}
 }
 
@@ -275,9 +295,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it.Expanded = !it.Expanded
 			if it.Expanded && it.Body == "" && !it.Loading {
 				it.Loading = true
+				it.changelogProbe = ghsource.NewChangelogProbe(it.Owner, it.Repo)
+				it.LoadingStage = it.changelogProbe.Filename()
 				m.refreshViewport()
 				m.scrollToCursor()
-				return m, fetchBody(m.cursor, *it)
+				return m, fetchChangelogFileCmd(m.cursor, *it)
 			}
 			m.refreshViewport()
 			m.scrollToCursor()
@@ -288,7 +310,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			it := m.items[m.cursor]
 			url := it.Homepage
-			if url == "" && it.Owner != "" {
+			if url == "" {
 				url = it.GitHubURL()
 			}
 			if url == "" {
@@ -325,10 +347,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, upgradePackage(m.cursor, *it)
 		}
 
+	case changelogFileMissingMsg:
+		if msg.index >= 0 && msg.index < len(m.items) {
+			it := m.items[msg.index]
+			if name := it.changelogProbe.Filename(); name != "" {
+				m.items[msg.index].LoadingStage = name
+				m.refreshViewport()
+				return m, fetchChangelogFileCmd(msg.index, it)
+			}
+			m.items[msg.index].LoadingStage = "releases"
+			m.refreshViewport()
+			return m, fetchReleasesCmd(msg.index, it)
+		}
+
 	case bodyFetchedMsg:
 		if msg.index >= 0 && msg.index < len(m.items) {
 			m.items[msg.index].Body = msg.body
 			m.items[msg.index].Loading = false
+			m.items[msg.index].LoadingStage = ""
+			m.items[msg.index].changelogProbe = nil
 			m.refreshViewport()
 		}
 
@@ -486,7 +523,11 @@ func (m model) renderList() (string, []int) {
 			var content string
 			switch {
 			case it.Loading:
-				content = m.spinner.View() + " fetching changelog..."
+				if it.LoadingStage == "releases" {
+					content = m.spinner.View() + " fetching releases..."
+				} else {
+					content = m.spinner.View() + " checking " + it.LoadingStage + "..."
+				}
 			case it.Body != "":
 				content = it.Body
 			default:

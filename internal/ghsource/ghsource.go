@@ -83,32 +83,76 @@ type contentsResponse struct {
 	Content string `json:"content"`
 }
 
+// FetchChangelogFileAt tries fetching a single candidate changelog filename
+// from the repo's default branch.
+func FetchChangelogFileAt(owner, repo, filename string) (content string, ok bool) {
+	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", apiBaseURL, owner, repo, filename)
+	resp, err := get(url)
+	if err != nil {
+		return "", false
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+
+	var parsed contentsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(parsed.Content, "\n", ""))
+	if err != nil || len(decoded) == 0 {
+		return "", false
+	}
+	return string(decoded), true
+}
+
 // FetchChangelogFile tries each well-known changelog filename in turn on
 // the repo's default branch, returning the first one found.
 func FetchChangelogFile(owner, repo string) (filename, content string, ok bool) {
-	for _, name := range changelogFilenames {
-		url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", apiBaseURL, owner, repo, name)
-		resp, err := get(url)
-		if err != nil {
-			continue
+	p := NewChangelogProbe(owner, repo)
+	for name := p.Filename(); name != ""; name = p.Filename() {
+		if content, ok := p.Try(); ok {
+			return name, content, true
 		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil || resp.StatusCode != http.StatusOK {
-			continue
-		}
-
-		var parsed contentsResponse
-		if err := json.Unmarshal(body, &parsed); err != nil {
-			continue
-		}
-		decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(parsed.Content, "\n", ""))
-		if err != nil || len(decoded) == 0 {
-			continue
-		}
-		return name, string(decoded), true
 	}
 	return "", "", false
+}
+
+// ChangelogProbe steps through the well-known changelog filenames for a
+// repo one at a time, so a caller (e.g. the TUI) can report which filename
+// is currently being checked without knowing the candidate list itself.
+type ChangelogProbe struct {
+	owner, repo string
+	idx         int
+}
+
+// NewChangelogProbe creates a probe positioned at the first candidate
+// changelog filename for owner/repo.
+func NewChangelogProbe(owner, repo string) *ChangelogProbe {
+	return &ChangelogProbe{owner: owner, repo: repo}
+}
+
+// Filename returns the candidate filename the next call to Try will check,
+// or "" once every candidate has been tried.
+func (p *ChangelogProbe) Filename() string {
+	if p.idx >= len(changelogFilenames) {
+		return ""
+	}
+	return changelogFilenames[p.idx]
+}
+
+// Try fetches the current candidate filename and advances the probe to the
+// next one. ok reports whether the file was found.
+func (p *ChangelogProbe) Try() (content string, ok bool) {
+	name := p.Filename()
+	if name == "" {
+		return "", false
+	}
+	content, ok = FetchChangelogFileAt(p.owner, p.repo, name)
+	p.idx++
+	return content, ok
 }
 
 // Release is a single GitHub release.

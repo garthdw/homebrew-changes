@@ -300,12 +300,22 @@ func TestRenderList_UpgradingShowsIndicator(t *testing.T) {
 }
 
 func TestRenderList_LoadingShowsSpinner(t *testing.T) {
-	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true}}
+	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true, LoadingStage: "CHANGELOG.md"}}
 	m := newModel(items)
 
 	content, _ := m.renderList()
-	if !strings.Contains(content, "fetching changelog") {
+	if !strings.Contains(content, "checking CHANGELOG.md") {
 		t.Errorf("expected loading indicator in content, got %q", content)
+	}
+}
+
+func TestRenderList_LoadingReleasesShowsSpinner(t *testing.T) {
+	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true, LoadingStage: "releases"}}
+	m := newModel(items)
+
+	content, _ := m.renderList()
+	if !strings.Contains(content, "fetching releases") {
+		t.Errorf("expected releases loading indicator in content, got %q", content)
 	}
 }
 
