@@ -41,6 +41,15 @@ type Item struct {
 	UpgradeErr string
 }
 
+// GitHubURL returns the item's GitHub repo URL, or empty if none could be
+// resolved.
+func (it Item) GitHubURL() string {
+	if it.Owner == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/%s/%s", it.Owner, it.Repo)
+}
+
 // Action is what the user asked to do when they quit the list.
 type Action int
 
@@ -280,8 +289,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it := m.items[m.cursor]
 			url := it.Homepage
 			if url == "" && it.Owner != "" {
-				url = fmt.Sprintf("https://github.com/%s/%s", it.Owner, it.Repo)
+				url = it.GitHubURL()
 			}
+			if url == "" {
+				return m, nil
+			}
+			return m, openURL(url)
+
+		case "g":
+			if len(m.items) == 0 {
+				return m, nil
+			}
+			url := m.items[m.cursor].GitHubURL()
 			if url == "" {
 				return m, nil
 			}
@@ -368,9 +387,31 @@ func (m model) View() string {
 	b.WriteString("\n\n")
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n\n")
-	b.WriteString(styleDim.Render("[↑/↓, j/k, J/K] move  [enter] expand/collapse [o] open homepage  [a] upgrade all  [u] upgrade current  [q] quit"))
+	b.WriteString(styleDim.Render(m.helpText()))
 
 	return b.String()
+}
+
+// helpText builds the footer hint line, including [o] only when the
+// highlighted item has a homepage distinct from its GitHub repo, and [g]
+// only when it has a resolved GitHub repo.
+func (m model) helpText() string {
+	help := "[↑/↓, j/k, J/K] move  [enter] expand/collapse"
+	if len(m.items) > 0 {
+		it := m.items[m.cursor]
+		var githubUrl = it.GitHubURL()
+		if it.Homepage != "" && it.Homepage != githubUrl {
+			help += "  [o] open homepage"
+		}
+		if githubUrl != "" {
+			help += "  [g] open github"
+		}
+	}
+	help += "  [a] upgrade all"
+	if len(m.items) > 0 && !m.items[m.cursor].Upgraded {
+		help += "  [u] upgrade current"
+	}
+	return help + "  [q] quit"
 }
 
 // renderList builds the scrollable document: one line per package, with the
