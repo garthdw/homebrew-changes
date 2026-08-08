@@ -28,6 +28,11 @@ type Item struct {
 	Owner     string // GitHub owner, empty if no repo could be resolved
 	Repo      string // GitHub repo name
 
+	// ManualChangelogURL is a manually curated changelog/release-notes
+	// link (see internal/knownchangelogs) used when no GitHub repo could
+	// be resolved automatically. Empty if none is known.
+	ManualChangelogURL string
+
 	Expanded     bool
 	Loading      bool
 	LoadingStage string // "changelog" while resolving/fetching the changelog file, or "releases" once falling back to release notes
@@ -144,6 +149,11 @@ type changelogResolvedMsg struct {
 func resolveChangelogCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
 		if it.Owner == "" {
+			if it.ManualChangelogURL != "" {
+				body := "No GitHub repository could be resolved automatically for this package.\n\n" +
+					renderMarkdown(fmt.Sprintf("Known changelog: [%s](%s)", it.ManualChangelogURL, it.ManualChangelogURL))
+				return bodyFetchedMsg{index: index, body: body}
+			}
 			return bodyFetchedMsg{index: index, body: "No GitHub repository could be resolved for this package; changelog unavailable."}
 		}
 		name, useReleases := ghsource.ResolveChangelogSource(it.Owner, it.Repo)

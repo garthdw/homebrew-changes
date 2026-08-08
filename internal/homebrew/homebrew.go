@@ -109,7 +109,10 @@ func firstOrEmpty(versions []string) string {
 type formulaInfo struct {
 	Name     string `json:"name"`
 	Homepage string `json:"homepage"`
-	URLs     struct {
+	Versions struct {
+		Stable string `json:"stable"`
+	} `json:"versions"`
+	URLs struct {
 		Stable struct {
 			URL string `json:"url"`
 		} `json:"stable"`
@@ -122,6 +125,7 @@ type formulaInfo struct {
 type caskInfo struct {
 	Token    string `json:"token"`
 	Homepage string `json:"homepage"`
+	Version  string `json:"version"`
 	URL      string `json:"url"`
 }
 
@@ -133,10 +137,12 @@ type caskInfoResult struct {
 	Casks []caskInfo `json:"casks"`
 }
 
-// Info is a package's homepage and source/download URL.
+// Info is a package's homepage, source/download URL, and current stable
+// version.
 type Info struct {
 	Homepage string
 	URL      string
+	Version  string
 }
 
 // ResolveInfoBatch returns homepage/source info for multiple formulae or
@@ -159,7 +165,7 @@ func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
 			return nil, fmt.Errorf("parsing brew info --cask %v output: %w", names, err)
 		}
 		for _, c := range result.Casks {
-			infos[c.Token] = Info{Homepage: c.Homepage, URL: c.URL}
+			infos[c.Token] = Info{Homepage: c.Homepage, URL: c.URL, Version: c.Version}
 		}
 		return infos, nil
 	}
@@ -178,7 +184,7 @@ func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
 		if url == "" {
 			url = f.URLs.Head.URL
 		}
-		infos[f.Name] = Info{Homepage: f.Homepage, URL: url}
+		infos[f.Name] = Info{Homepage: f.Homepage, URL: url, Version: f.Versions.Stable}
 	}
 	return infos, nil
 }

@@ -121,6 +121,22 @@ func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 	}
 }
 
+func TestResolveChangelogCmd_NoRepoWithManualURL(t *testing.T) {
+	it := Item{Name: "rust", ManualChangelogURL: "https://example.com/rust/RELEASES.md"}
+	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
+	if !strings.Contains(msg.body, "https://example.com/rust/RELEASES.md") {
+		t.Errorf("expected body to mention the manual changelog URL, got %q", msg.body)
+	}
+}
+
+func TestResolveChangelogCmd_NoRepoNoManualURL(t *testing.T) {
+	it := Item{Name: "mystery-pkg"}
+	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
+	if strings.Contains(msg.body, "http") {
+		t.Errorf("expected no URL in body when none is known, got %q", msg.body)
+	}
+}
+
 func TestUpdate_EnterOnEmptyList(t *testing.T) {
 	m := readyModel(nil)
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

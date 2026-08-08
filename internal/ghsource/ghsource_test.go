@@ -59,6 +59,13 @@ func TestResolveRepo(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name:      "repo name contains a dot",
+			url:       "https://github.com/ggml-org/llama.cpp.git",
+			wantOwner: "ggml-org",
+			wantRepo:  "llama.cpp",
+			wantOK:    true,
+		},
+		{
 			name:     "neither points at github",
 			homepage: "https://example.com",
 			url:      "https://gitlab.com/owner/repo",
@@ -294,6 +301,54 @@ func TestFetchReleases_TagPrefixOtherThanV(t *testing.T) {
 	}
 }
 
+func TestFetchReleases_FallsBackToTagsWhenNoReleases(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/releases":
+			w.Write([]byte("[]"))
+		case "/repos/o/r/tags":
+			body, _ := json.Marshal([]map[string]string{
+				{"name": "v2.0.0"},
+				{"name": "v1.0.0"},
+			})
+			w.Write(body)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	releases, err := FetchReleases("o", "r", "1.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 1 || releases[0].TagName != "v2.0.0" {
+		t.Errorf("got %+v, want only v2.0.0 (from tags fallback)", releases)
+	}
+}
+
+func TestFetchReleases_NoFallbackWhenReleasesExistButNoneAreNewer(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/releases":
+			body, _ := json.Marshal([]Release{{TagName: "v1.0.0"}})
+			w.Write(body)
+		case "/repos/o/r/tags":
+			t.Error("should not fall back to tags when releases exist")
+			w.Write([]byte("[]"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	releases, err := FetchReleases("o", "r", "1.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 0 {
+		t.Errorf("got %+v, want none (already up to date)", releases)
+	}
+}
+
 func TestTagMatchesVersion(t *testing.T) {
 	tests := []struct {
 		tag, version string
@@ -309,8 +364,8 @@ func TestTagMatchesVersion(t *testing.T) {
 		{"", "1.8.1", false},
 	}
 	for _, tt := range tests {
-		if got := tagMatchesVersion(tt.tag, tt.version); got != tt.want {
-			t.Errorf("tagMatchesVersion(%q, %q) = %v, want %v", tt.tag, tt.version, got, tt.want)
+		if got := TagMatchesVersion(tt.tag, tt.version); got != tt.want {
+			t.Errorf("TagMatchesVersion(%q, %q) = %v, want %v", tt.tag, tt.version, got, tt.want)
 		}
 	}
 }

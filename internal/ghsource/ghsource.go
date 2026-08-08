@@ -23,7 +23,12 @@ var changelogFilenames = []string{"CHANGELOG.md", "CHANGES.md", "HISTORY.md", "N
 // apiBaseURL is the GitHub REST API base, overridable in tests.
 var apiBaseURL = "https://api.github.com"
 
-var githubURLPattern = regexp.MustCompile(`github\.com[:/]([^/]+)/([^/.]+)(\.git)?(/.*)?$`)
+// githubURLPattern matches a GitHub owner/repo out of a URL. The repo
+// group is lazy so it stops at the shortest prefix that leaves a valid
+// trailing ".git" and/or "/..." path — this lets repo names contain dots
+// themselves (e.g. "llama.cpp", "socket.io") rather than treating the
+// first dot as the start of a ".git" suffix.
+var githubURLPattern = regexp.MustCompile(`github\.com[:/]([^/]+)/([^/]+?)(\.git)?(/.*)?$`)
 
 // ResolveRepo extracts "owner" and "repo" from a URL pointing at
 // github.com, trying homepage first and falling back to url. ok is false if
@@ -311,7 +316,7 @@ type Release struct {
 
 const maxReleasePages = 3
 
-// tagMatchesVersion reports whether a release tag identifies the given
+// TagMatchesVersion reports whether a release tag identifies the given
 // plain version string (e.g. Homebrew's "1.8.1"), regardless of whatever
 // prefix the upstream project puts on its tags: "v1.8.1", "jq-1.8.1", and
 // even "2024-edition-v1.8.1" all match "1.8.1".
@@ -322,7 +327,7 @@ const maxReleasePages = 3
 // digit" isn't: without it, version "2.3" would wrongly match tag "1.2.3"
 // (the tail of a different, longer version number) since '.' would be
 // mistaken for a valid prefix separator.
-func tagMatchesVersion(tag, version string) bool {
+func TagMatchesVersion(tag, version string) bool {
 	if version == "" {
 		return false
 	}
@@ -385,16 +390,83 @@ func normalizeVersionComponent(s string) string {
 
 // FetchReleases returns releases newer than installedVersion, newest first,
 // capped at a reasonable count. It stops as soon as it reaches the release
-// matching installedVersion (see tagMatchesVersion), since everything after
+// matching installedVersion (see TagMatchesVersion), since everything after
 // that in the newest-first list is already installed.
+//
+// Some repos (docker/cli, vim/vim, ...) never publish GitHub Releases at
+// all — they just tag commits directly. When the Releases API comes back
+// completely empty (as opposed to "no releases newer than installed"),
+// FetchReleases falls back to the plain git tags API, which GitHub returns
+// newest-first the same way and which TagMatchesVersion can filter
+// identically. The fallback only has tag names to work with, so the
+// resulting Releases have empty PublishedAt/Body.
 func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
+	filtered, sawAny, err := fetchReleasePages(owner, repo, installedVersion)
+	if err != nil {
+		return nil, err
+	}
+	if !sawAny {
+		return fetchTags(owner, repo, installedVersion)
+	}
+	return filtered, nil
+}
+
+func fetchReleasePages(owner, repo, installedVersion string) ([]Release, bool, error) {
 	var filtered []Release
+	sawAny := false
 	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", apiBaseURL, owner, repo)
 
 	for page := 0; page < maxReleasePages && url != "" && len(filtered) < 20; page++ {
 		resp, err := get(url)
 		if err != nil {
-			return nil, fmt.Errorf("fetching releases for %s/%s: %w", owner, repo, err)
+			return nil, false, fmt.Errorf("fetching releases for %s/%s: %w", owner, repo, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, false, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, false, fmt.Errorf("fetching releases for %s/%s: status %d", owner, repo, resp.StatusCode)
+		}
+
+		var pageReleases []Release
+		if err := json.Unmarshal(body, &pageReleases); err != nil {
+			return nil, false, fmt.Errorf("parsing releases for %s/%s: %w", owner, repo, err)
+		}
+		if len(pageReleases) > 0 {
+			sawAny = true
+		}
+		for _, r := range pageReleases {
+			if TagMatchesVersion(r.TagName, installedVersion) {
+				return filtered, sawAny, nil
+			}
+			filtered = append(filtered, r)
+			if len(filtered) >= 20 {
+				return filtered, sawAny, nil
+			}
+		}
+
+		url = nextPageURL(resp.Header.Get("Link"))
+	}
+
+	return filtered, sawAny, nil
+}
+
+type tagEntry struct {
+	Name string `json:"name"`
+}
+
+// fetchTags mirrors fetchReleasePages against the tags API instead of
+// releases, for repos that don't use GitHub Releases at all.
+func fetchTags(owner, repo, installedVersion string) ([]Release, error) {
+	var filtered []Release
+	url := fmt.Sprintf("%s/repos/%s/%s/tags?per_page=100", apiBaseURL, owner, repo)
+
+	for page := 0; page < maxReleasePages && url != "" && len(filtered) < 20; page++ {
+		resp, err := get(url)
+		if err != nil {
+			return nil, fmt.Errorf("fetching tags for %s/%s: %w", owner, repo, err)
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -402,18 +474,18 @@ func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
 			return nil, err
 		}
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("fetching releases for %s/%s: status %d", owner, repo, resp.StatusCode)
+			return nil, fmt.Errorf("fetching tags for %s/%s: status %d", owner, repo, resp.StatusCode)
 		}
 
-		var pageReleases []Release
-		if err := json.Unmarshal(body, &pageReleases); err != nil {
-			return nil, fmt.Errorf("parsing releases for %s/%s: %w", owner, repo, err)
+		var tags []tagEntry
+		if err := json.Unmarshal(body, &tags); err != nil {
+			return nil, fmt.Errorf("parsing tags for %s/%s: %w", owner, repo, err)
 		}
-		for _, r := range pageReleases {
-			if tagMatchesVersion(r.TagName, installedVersion) {
+		for _, t := range tags {
+			if TagMatchesVersion(t.Name, installedVersion) {
 				return filtered, nil
 			}
-			filtered = append(filtered, r)
+			filtered = append(filtered, Release{TagName: t.Name})
 			if len(filtered) >= 20 {
 				return filtered, nil
 			}

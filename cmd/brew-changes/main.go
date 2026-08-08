@@ -8,6 +8,7 @@ import (
 
 	"github.com/garthdw/homebrew-changes/internal/ghsource"
 	"github.com/garthdw/homebrew-changes/internal/homebrew"
+	"github.com/garthdw/homebrew-changes/internal/knownchangelogs"
 	"github.com/garthdw/homebrew-changes/internal/ui"
 )
 
@@ -59,14 +60,20 @@ func run() error {
 		info := infos[pkg.Name]
 		owner, repo, _ := ghsource.ResolveRepo(info.Homepage, info.URL)
 
+		var manualChangelogURL string
+		if owner == "" {
+			manualChangelogURL, _ = knownchangelogs.Lookup(pkg.Name)
+		}
+
 		items = append(items, ui.Item{
-			Name:      pkg.Name,
-			Kind:      kind,
-			Installed: pkg.Installed,
-			Current:   pkg.Current,
-			Homepage:  info.Homepage,
-			Owner:     owner,
-			Repo:      repo,
+			Name:               pkg.Name,
+			Kind:               kind,
+			Installed:          pkg.Installed,
+			Current:            pkg.Current,
+			Homepage:           info.Homepage,
+			Owner:              owner,
+			Repo:               repo,
+			ManualChangelogURL: manualChangelogURL,
 		})
 	}
 
